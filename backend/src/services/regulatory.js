@@ -1,8 +1,6 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const { callOpenRouter, SMART_MODEL } = require('./ai');
 const { supabase } = require('./supabase');
 const { getBot, getOwnerId } = require('./telegram');
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 /**
  * Regulatory watch: uses AI to check for new French regulations
@@ -13,10 +11,7 @@ async function checkRegulatoryUpdates() {
   const currentDate = new Date().toISOString().split('T')[0];
 
   try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      system: `Tu es un veilleur juridique et fiscal specialise dans les obligations des Entreprises Individuelles (EI) en France.
+    const systemPrompt = `Tu es un veilleur juridique et fiscal specialise dans les obligations des Entreprises Individuelles (EI) en France.
 
 Date d'aujourd'hui: ${currentDate}
 
@@ -51,11 +46,12 @@ Concentre-toi sur:
 - E-commerce (RGPD, droit de retractation, nouvelles obligations)
 
 Ne retourne que les changements effectifs ou a venir dans les 12 prochains mois.
-Si rien de nouveau, retourne {"alerts": []}.`,
-      messages: [{ role: 'user', content: `Quelles sont les nouvelles obligations reglementaires ou changements a venir pour une EI francaise en ${currentDate.substring(0, 4)} ? Inclus les echeances de facturation electronique.` }]
-    });
+Si rien de nouveau, retourne {"alerts": []}.`;
 
-    const text = response.content[0].text.trim();
+    const text = await callOpenRouter(SMART_MODEL, [
+      { role: 'user', content: `Quelles sont les nouvelles obligations reglementaires ou changements a venir pour une EI francaise en ${currentDate.substring(0, 4)} ? Inclus les echeances de facturation electronique.` }
+    ], { maxTokens: 2000, system: systemPrompt });
+
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { alerts: [], error: 'No JSON in response' };
 
