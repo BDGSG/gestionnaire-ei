@@ -2,7 +2,7 @@ import React from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, FileText, FileCheck, FolderOpen,
-  ArrowLeftRight, Calendar, Building2, Menu, X
+  ArrowLeftRight, Calendar, Building2, Menu, X, Shield
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Clients from './pages/Clients';
@@ -11,6 +11,7 @@ import Quotes from './pages/Quotes';
 import Documents from './pages/Documents';
 import Transactions from './pages/Transactions';
 import Fiscal from './pages/Fiscal';
+import Regulatory from './pages/Regulatory';
 import Settings from './pages/Settings';
 
 const navItems = [
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/documents', icon: FolderOpen, label: 'Documents' },
   { to: '/transactions', icon: ArrowLeftRight, label: 'Transactions' },
   { to: '/fiscal', icon: Calendar, label: 'Fiscal & TVA' },
+  { to: '/veille', icon: Shield, label: 'Veille reglementaire' },
   { to: '/parametres', icon: Building2, label: 'Entreprise' },
 ];
 
@@ -84,6 +86,7 @@ export default function App() {
             <Route path="/documents" element={<Documents />} />
             <Route path="/transactions" element={<Transactions />} />
             <Route path="/fiscal" element={<Fiscal />} />
+            <Route path="/veille" element={<Regulatory />} />
             <Route path="/parametres" element={<Settings />} />
           </Routes>
         </div>

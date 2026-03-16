@@ -12,6 +12,7 @@ const transactionsRouter = require('./routes/transactions');
 const dashboardRouter = require('./routes/dashboard');
 const fiscalRouter = require('./routes/fiscal');
 const companyRouter = require('./routes/company');
+const regulatoryRouter = require('./routes/regulatory');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -33,6 +34,7 @@ app.use('/api/transactions', transactionsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/fiscal', fiscalRouter);
 app.use('/api/company', companyRouter);
+app.use('/api/regulatory', regulatoryRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {

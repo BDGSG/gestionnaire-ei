@@ -4,6 +4,9 @@ const { classifyDocument, CONFIDENCE_THRESHOLD } = require('./ai');
 const { generateInvoicePdf } = require('./pdf');
 const dayjs = require('dayjs');
 
+// Lazy import to avoid circular dependency
+function getRegulatory() { return require('./regulatory'); }
+
 let bot;
 const OWNER_ID = Number(process.env.TELEGRAM_OWNER_ID);
 
@@ -36,6 +39,7 @@ function initBot() {
       `📂 /docs - Rechercher un document\n` +
       `💳 /recette - Enregistrer une recette\n` +
       `💸 /depense - Enregistrer une dépense\n` +
+      `⚖️ /veille - Veille réglementaire (nouvelles lois)\n` +
       `🌐 /web - Lien vers le dashboard\n\n` +
       `📎 *Envoyez une photo ou un PDF* pour le classer automatiquement`,
       { parse_mode: 'Markdown' }
@@ -703,6 +707,53 @@ function initBot() {
   bot.onText(/^\/docs$/, (msg) => {
     if (!isOwner(msg)) return;
     bot.sendMessage(msg.chat.id, '🔍 Usage: `/docs mot-clé`\nExemple: `/docs uber` ou `/docs assurance`', { parse_mode: 'Markdown' });
+  });
+
+  // ============================================
+  // /veille - Veille réglementaire
+  // ============================================
+  bot.onText(/\/veille/, async (msg) => {
+    if (!isOwner(msg)) return;
+    bot.sendMessage(msg.chat.id, '⚖️ _Analyse des nouvelles réglementations en cours..._', { parse_mode: 'Markdown' });
+
+    try {
+      const result = await getRegulatory().checkRegulatoryUpdates();
+
+      if (result.error) {
+        return bot.sendMessage(msg.chat.id, `❌ Erreur: ${result.error}`);
+      }
+
+      if (result.newCount === 0 && result.total === 0) {
+        return bot.sendMessage(msg.chat.id, '✅ *Veille réglementaire*\n\nAucune nouvelle alerte détectée. Tout est à jour !', { parse_mode: 'Markdown' });
+      }
+
+      // Show summary of existing alerts
+      const { data: pending } = await supabase
+        .from('ei_regulatory_watch')
+        .select('*')
+        .in('status', ['new', 'read'])
+        .order('severity')
+        .limit(10);
+
+      if (!pending || pending.length === 0) {
+        return bot.sendMessage(msg.chat.id, `✅ *Veille réglementaire*\n\n${result.newCount} nouvelle(s) alerte(s) analysée(s). Aucune action requise.`, { parse_mode: 'Markdown' });
+      }
+
+      const sevIcons = { critical: '🔴', warning: '🟡', info: '🟢' };
+      const lines = pending.map(a =>
+        `${sevIcons[a.severity] || '🟢'} *${a.title}*\n   ${a.action_required || a.description?.substring(0, 80) || ''}`
+      ).join('\n\n');
+
+      bot.sendMessage(msg.chat.id,
+        `⚖️ *Veille réglementaire*\n\n` +
+        `${result.newCount > 0 ? `🆕 ${result.newCount} nouvelle(s) alerte(s)\n\n` : ''}` +
+        `📋 *Alertes en cours (${pending.length}):*\n\n${lines}\n\n` +
+        `🌐 Détails complets sur le dashboard`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      bot.sendMessage(msg.chat.id, `❌ Erreur veille: ${err.message}`);
+    }
   });
 
   console.log('[Telegram] Bot ready, owner ID:', OWNER_ID);

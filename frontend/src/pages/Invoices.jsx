@@ -28,7 +28,7 @@ export default function Invoices() {
   const [newClient, setNewClient] = useState(emptyNewClient);
   const [creatingClient, setCreatingClient] = useState(false);
   const [filter, setFilter] = useState({});
-  const [form, setForm] = useState({ client_id: '', activity: 'vtc', tva_rate: 20, items: [{ description: '', quantity: 1, unit_price_ht: 0 }] });
+  const [form, setForm] = useState({ client_id: '', activity: 'vtc', tva_rate: 20, operation_type: 'SERVICE', delivery_address: '', items: [{ description: '', quantity: 1, unit_price_ht: 0 }] });
 
   const loadInvoices = () => api.getInvoices(filter).then(setInvoices).catch(console.error);
   const loadClients = () => api.getClients().then(setClients).catch(console.error);
@@ -48,7 +48,7 @@ export default function Invoices() {
       await api.createInvoice(form);
       setShowForm(false);
       setShowNewClient(false);
-      setForm({ client_id: '', activity: 'vtc', tva_rate: 20, items: [{ description: '', quantity: 1, unit_price_ht: 0 }] });
+      setForm({ client_id: '', activity: 'vtc', tva_rate: 20, operation_type: 'SERVICE', delivery_address: '', items: [{ description: '', quantity: 1, unit_price_ht: 0 }] });
       loadInvoices();
     } catch (err) { alert(err.message); }
   };
@@ -186,6 +186,24 @@ export default function Invoices() {
                   <option value="ecommerce">E-commerce</option>
                   <option value="services_numeriques">Services numeriques</option>
                 </select>
+              </div>
+            </div>
+
+            {/* Champs obligatoires 2026 */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nature de l'operation *</label>
+                <select value={form.operation_type} onChange={e => setForm({ ...form, operation_type: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="SERVICE">Prestation de services</option>
+                  <option value="GOODS">Livraison de biens</option>
+                  <option value="MIXED">Mixte</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Adresse de livraison</label>
+                <input value={form.delivery_address || ''} onChange={e => setForm({ ...form, delivery_address: e.target.value })}
+                  placeholder="Si differente du client" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
               </div>
             </div>
 

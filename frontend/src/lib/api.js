@@ -71,4 +71,10 @@ export const api = {
   updateDeadline: (id, data) => request(`/fiscal/deadlines/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   createDeadline: (data) => request('/fiscal/deadlines', { method: 'POST', body: JSON.stringify(data) }),
   getTvaSummary: (year) => request(`/fiscal/tva-summary?year=${year}`),
+
+  // Regulatory
+  getRegulatoryAlerts: (params) => request(`/regulatory${params ? '?' + new URLSearchParams(params) : ''}`),
+  checkRegulatory: () => request('/regulatory/check', { method: 'POST' }),
+  updateRegulatoryAlert: (id, data) => request(`/regulatory/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteRegulatoryAlert: (id) => request(`/regulatory/${id}`, { method: 'DELETE' }),
 };
