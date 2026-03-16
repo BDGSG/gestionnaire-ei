@@ -1,0 +1,633 @@
+const TelegramBot = require('node-telegram-bot-api');
+const { supabase } = require('./supabase');
+const { classifyDocument } = require('./ai');
+const { generateInvoicePdf } = require('./pdf');
+const dayjs = require('dayjs');
+
+let bot;
+const OWNER_ID = Number(process.env.TELEGRAM_OWNER_ID);
+
+function initBot() {
+  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+
+  // Vérifier que c'est le propriétaire
+  function isOwner(msg) {
+    return msg.from.id === OWNER_ID;
+  }
+
+  // ============================================
+  // /start - Accueil
+  // ============================================
+  bot.onText(/\/start/, (msg) => {
+    if (!isOwner(msg)) return bot.sendMessage(msg.chat.id, '⛔ Accès non autorisé.');
+    bot.sendMessage(msg.chat.id,
+      `🏢 *Gestionnaire EI - DIAMBRA BROU*\n\n` +
+      `Commandes disponibles :\n\n` +
+      `📄 /facture - Créer une facture\n` +
+      `📋 /devis - Créer un devis\n` +
+      `👥 /clients - Gérer les clients\n` +
+      `💰 /ca - Voir le chiffre d'affaires\n` +
+      `📊 /tva - Résumé TVA du mois\n` +
+      `📅 /echeances - Prochaines échéances fiscales\n` +
+      `📂 /docs - Rechercher un document\n` +
+      `💳 /recette - Enregistrer une recette\n` +
+      `💸 /depense - Enregistrer une dépense\n` +
+      `🌐 /web - Lien vers le dashboard\n\n` +
+      `📎 *Envoyez une photo ou un PDF* pour le classer automatiquement`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /web - Lien dashboard
+  // ============================================
+  bot.onText(/\/web/, (msg) => {
+    if (!isOwner(msg)) return;
+    const url = process.env.APP_URL || 'http://localhost:5173';
+    bot.sendMessage(msg.chat.id, `🌐 Dashboard : ${url}`);
+  });
+
+  // ============================================
+  // /ca - Chiffre d'affaires
+  // ============================================
+  bot.onText(/\/ca/, async (msg) => {
+    if (!isOwner(msg)) return;
+    const now = dayjs();
+    const startMonth = now.startOf('month').format('YYYY-MM-DD');
+    const startYear = now.startOf('year').format('YYYY-MM-DD');
+    const endDate = now.format('YYYY-MM-DD');
+
+    const { data: monthData } = await supabase
+      .from('transactions')
+      .select('amount_ttc, activity')
+      .eq('type', 'recette')
+      .gte('date', startMonth)
+      .lte('date', endDate);
+
+    const { data: yearData } = await supabase
+      .from('transactions')
+      .select('amount_ttc, activity')
+      .eq('type', 'recette')
+      .gte('date', startYear)
+      .lte('date', endDate);
+
+    const monthTotal = (monthData || []).reduce((s, t) => s + Number(t.amount_ttc), 0);
+    const yearTotal = (yearData || []).reduce((s, t) => s + Number(t.amount_ttc), 0);
+
+    // Par activité
+    const byActivity = {};
+    (yearData || []).forEach(t => {
+      const key = t.activity || 'autre';
+      byActivity[key] = (byActivity[key] || 0) + Number(t.amount_ttc);
+    });
+
+    const activityLabels = { vtc: '🚗 VTC', ecommerce: '🛒 E-commerce', services_numeriques: '💻 Services numériques', general: '📦 Général' };
+    const activityLines = Object.entries(byActivity)
+      .map(([k, v]) => `  ${activityLabels[k] || k}: ${v.toFixed(2)} €`)
+      .join('\n');
+
+    bot.sendMessage(msg.chat.id,
+      `📊 *Chiffre d'affaires*\n\n` +
+      `📅 Ce mois (${now.format('MMMM YYYY')}):\n  *${monthTotal.toFixed(2)} € TTC*\n\n` +
+      `📅 Cette année (${now.year()}):\n  *${yearTotal.toFixed(2)} € TTC*\n\n` +
+      `Par activité (annuel):\n${activityLines || '  Aucune recette'}`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /tva - Résumé TVA
+  // ============================================
+  bot.onText(/\/tva/, async (msg) => {
+    if (!isOwner(msg)) return;
+    const now = dayjs();
+    const month = now.month() + 1;
+    const year = now.year();
+
+    const { data: collected } = await supabase
+      .from('transactions')
+      .select('amount_tva')
+      .eq('type', 'recette')
+      .gte('date', now.startOf('month').format('YYYY-MM-DD'))
+      .lte('date', now.endOf('month').format('YYYY-MM-DD'));
+
+    const { data: deductible } = await supabase
+      .from('transactions')
+      .select('amount_tva')
+      .eq('type', 'depense')
+      .gte('date', now.startOf('month').format('YYYY-MM-DD'))
+      .lte('date', now.endOf('month').format('YYYY-MM-DD'));
+
+    const tvaCollected = (collected || []).reduce((s, t) => s + Number(t.amount_tva || 0), 0);
+    const tvaDeductible = (deductible || []).reduce((s, t) => s + Number(t.amount_tva || 0), 0);
+    const tvaDue = tvaCollected - tvaDeductible;
+
+    bot.sendMessage(msg.chat.id,
+      `🧾 *TVA - ${now.format('MMMM YYYY')}*\n\n` +
+      `TVA collectée (ventes): ${tvaCollected.toFixed(2)} €\n` +
+      `TVA déductible (achats): ${tvaDeductible.toFixed(2)} €\n` +
+      `━━━━━━━━━━━━━━━━━━━\n` +
+      `*TVA à reverser: ${tvaDue.toFixed(2)} €*\n\n` +
+      `⚠️ Déclaration CA3 avant le 20 du mois suivant`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /echeances - Prochaines échéances
+  // ============================================
+  bot.onText(/\/echeances/, async (msg) => {
+    if (!isOwner(msg)) return;
+    const today = dayjs().format('YYYY-MM-DD');
+
+    const { data: deadlines } = await supabase
+      .from('fiscal_deadlines')
+      .select('*')
+      .gte('deadline_date', today)
+      .eq('status', 'pending')
+      .order('deadline_date')
+      .limit(10);
+
+    if (!deadlines || deadlines.length === 0) {
+      return bot.sendMessage(msg.chat.id, '✅ Aucune échéance à venir !');
+    }
+
+    const lines = deadlines.map(d => {
+      const date = dayjs(d.deadline_date);
+      const diff = date.diff(dayjs(), 'day');
+      const urgency = diff <= 7 ? '🔴' : diff <= 14 ? '🟡' : '🟢';
+      return `${urgency} *${date.format('DD/MM/YYYY')}* (J-${diff})\n   ${d.title}\n   _${d.description || ''}_`;
+    }).join('\n\n');
+
+    bot.sendMessage(msg.chat.id,
+      `📅 *Prochaines échéances fiscales*\n\n${lines}`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /clients - Lister les clients
+  // ============================================
+  bot.onText(/\/clients/, async (msg) => {
+    if (!isOwner(msg)) return;
+
+    const { data: clients } = await supabase
+      .from('clients')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (!clients || clients.length === 0) {
+      return bot.sendMessage(msg.chat.id, '👥 Aucun client enregistré.\n\nUtilisez /addclient pour en ajouter.');
+    }
+
+    const lines = clients.map((c, i) => {
+      const name = c.company_name || `${c.first_name || ''} ${c.last_name || ''}`.trim();
+      const typeIcon = c.type === 'entreprise' ? '🏢' : c.type === 'plateforme' ? '📱' : '👤';
+      return `${i + 1}. ${typeIcon} *${name}*${c.activity ? ' (' + c.activity + ')' : ''}`;
+    }).join('\n');
+
+    bot.sendMessage(msg.chat.id, `👥 *Clients (${clients.length})*\n\n${lines}`, { parse_mode: 'Markdown' });
+  });
+
+  // ============================================
+  // /recette - Enregistrer une recette rapide
+  // ============================================
+  bot.onText(/\/recette/, (msg) => {
+    if (!isOwner(msg)) return;
+    bot.sendMessage(msg.chat.id,
+      `💰 *Enregistrer une recette*\n\nFormat:\n` +
+      `\`/r montant_ttc description activité\`\n\n` +
+      `Exemples:\n` +
+      `\`/r 150.50 Course VTC client Dupont vtc\`\n` +
+      `\`/r 45.00 Vente produit XXX ecommerce\`\n` +
+      `\`/r 500 Création site web services_numeriques\`\n\n` +
+      `Activités: vtc, ecommerce, services\\_numeriques`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.onText(/\/r (\d+\.?\d*) (.+) (vtc|ecommerce|services_numeriques)/, async (msg, match) => {
+    if (!isOwner(msg)) return;
+    const amountTtc = parseFloat(match[1]);
+    const description = match[2].trim();
+    const activity = match[3];
+    const tvaRate = 20;
+    const amountHt = amountTtc / (1 + tvaRate / 100);
+    const amountTva = amountTtc - amountHt;
+
+    const { error } = await supabase.from('transactions').insert({
+      type: 'recette',
+      activity,
+      date: dayjs().format('YYYY-MM-DD'),
+      description,
+      amount_ht: amountHt.toFixed(2),
+      amount_tva: amountTva.toFixed(2),
+      amount_ttc: amountTtc.toFixed(2),
+      tva_rate: tvaRate,
+      payment_method: 'virement'
+    });
+
+    if (error) {
+      return bot.sendMessage(msg.chat.id, `❌ Erreur: ${error.message}`);
+    }
+
+    bot.sendMessage(msg.chat.id,
+      `✅ *Recette enregistrée*\n\n` +
+      `💰 ${amountTtc.toFixed(2)} € TTC\n` +
+      `📝 ${description}\n` +
+      `🏷️ ${activity}\n` +
+      `🧾 TVA: ${amountTva.toFixed(2)} €`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /depense - Enregistrer une dépense
+  // ============================================
+  bot.onText(/\/d (\d+\.?\d*) (.+) (\w+)/, async (msg, match) => {
+    if (!isOwner(msg)) return;
+    const amountTtc = parseFloat(match[1]);
+    const description = match[2].trim();
+    const category = match[3];
+    const tvaRate = 20;
+    const amountHt = amountTtc / (1 + tvaRate / 100);
+    const amountTva = amountTtc - amountHt;
+
+    const { error } = await supabase.from('transactions').insert({
+      type: 'depense',
+      activity: 'general',
+      date: dayjs().format('YYYY-MM-DD'),
+      description,
+      amount_ht: amountHt.toFixed(2),
+      amount_tva: amountTva.toFixed(2),
+      amount_ttc: amountTtc.toFixed(2),
+      tva_rate: tvaRate,
+      expense_category: category,
+      payment_method: 'carte'
+    });
+
+    if (error) {
+      return bot.sendMessage(msg.chat.id, `❌ Erreur: ${error.message}`);
+    }
+
+    bot.sendMessage(msg.chat.id,
+      `✅ *Dépense enregistrée*\n\n` +
+      `💸 ${amountTtc.toFixed(2)} € TTC\n` +
+      `📝 ${description}\n` +
+      `🏷️ ${category}\n` +
+      `🧾 TVA déductible: ${amountTva.toFixed(2)} €`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ============================================
+  // /facture - Création rapide de facture
+  // ============================================
+  bot.onText(/\/facture/, async (msg) => {
+    if (!isOwner(msg)) return;
+
+    const { data: clients } = await supabase
+      .from('clients')
+      .select('id, company_name, first_name, last_name, type')
+      .order('company_name');
+
+    const keyboard = (clients || []).map(c => [{
+      text: c.company_name || `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+      callback_data: `invoice_client_${c.id}`
+    }]);
+    keyboard.push([{ text: '➕ Nouveau client', callback_data: 'invoice_new_client' }]);
+
+    bot.sendMessage(msg.chat.id, '📄 *Créer une facture*\n\nChoisissez le client:', {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard }
+    });
+  });
+
+  // ============================================
+  // Callback: sélection client pour facture
+  // ============================================
+  const invoiceState = {};
+
+  bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const data = query.data;
+
+    if (data.startsWith('invoice_client_')) {
+      const clientId = data.replace('invoice_client_', '');
+      invoiceState[chatId] = { clientId, step: 'activity' };
+
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, '🏷️ Activité de la facture ?', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚗 VTC', callback_data: 'invoice_act_vtc' }],
+            [{ text: '🛒 E-commerce', callback_data: 'invoice_act_ecommerce' }],
+            [{ text: '💻 Services numériques', callback_data: 'invoice_act_services_numeriques' }],
+          ]
+        }
+      });
+    }
+
+    if (data.startsWith('invoice_act_')) {
+      const activity = data.replace('invoice_act_', '');
+      if (invoiceState[chatId]) {
+        invoiceState[chatId].activity = activity;
+        invoiceState[chatId].step = 'items';
+        invoiceState[chatId].items = [];
+      }
+
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId,
+        `📝 *Ajoutez les lignes de facture*\n\nFormat:\n` +
+        `\`description | quantité | prix_unitaire_ht\`\n\n` +
+        `Exemple:\n` +
+        `\`Course VTC Paris-Orly | 1 | 65.00\`\n\n` +
+        `Envoyez chaque ligne séparément.\nTapez /valider quand terminé.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  });
+
+  // ============================================
+  // Réception des lignes de facture
+  // ============================================
+  bot.on('message', async (msg) => {
+    if (!isOwner(msg)) return;
+    const chatId = msg.chat.id;
+
+    // Vérifier si on est en mode saisie de lignes
+    if (invoiceState[chatId] && invoiceState[chatId].step === 'items' && msg.text && !msg.text.startsWith('/')) {
+      const parts = msg.text.split('|').map(s => s.trim());
+      if (parts.length >= 3) {
+        invoiceState[chatId].items.push({
+          description: parts[0],
+          quantity: parseFloat(parts[1]) || 1,
+          unit_price_ht: parseFloat(parts[2]) || 0,
+          tva_rate: 20
+        });
+        const item = invoiceState[chatId].items[invoiceState[chatId].items.length - 1];
+        const totalHt = item.quantity * item.unit_price_ht;
+        bot.sendMessage(chatId,
+          `✅ Ligne ajoutée: ${item.description} (${totalHt.toFixed(2)} € HT)\n` +
+          `Total lignes: ${invoiceState[chatId].items.length}\n\n` +
+          `Ajoutez une autre ligne ou tapez /valider`
+        );
+      }
+    }
+  });
+
+  // ============================================
+  // /valider - Finaliser la facture
+  // ============================================
+  bot.onText(/\/valider/, async (msg) => {
+    if (!isOwner(msg)) return;
+    const chatId = msg.chat.id;
+    const state = invoiceState[chatId];
+
+    if (!state || !state.items || state.items.length === 0) {
+      return bot.sendMessage(chatId, '❌ Aucune facture en cours ou aucune ligne ajoutée.');
+    }
+
+    bot.sendMessage(chatId, '⏳ Génération de la facture en cours...');
+
+    try {
+      // Récupérer infos entreprise
+      const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+      const company = companyArr[0];
+
+      // Récupérer client
+      const { data: clientArr } = await supabase.from('clients').select('*').eq('id', state.clientId);
+      const client = clientArr[0];
+
+      // Numéro de facture
+      const invoiceNumber = `${company.invoice_prefix}-${dayjs().format('YYYY')}-${String(company.next_invoice_number).padStart(4, '0')}`;
+
+      // Calculs
+      const totalHt = state.items.reduce((s, i) => s + i.quantity * i.unit_price_ht, 0);
+      const totalTva = state.items.reduce((s, i) => s + i.quantity * i.unit_price_ht * i.tva_rate / 100, 0);
+      const totalTtc = totalHt + totalTva;
+
+      // Créer la facture en BDD
+      const { data: invoice, error: invErr } = await supabase.from('invoices').insert({
+        invoice_number: invoiceNumber,
+        client_id: state.clientId,
+        status: 'draft',
+        activity: state.activity,
+        issue_date: dayjs().format('YYYY-MM-DD'),
+        due_date: dayjs().add(company.default_payment_delay_days || 30, 'day').format('YYYY-MM-DD'),
+        total_ht: totalHt.toFixed(2),
+        total_tva: totalTva.toFixed(2),
+        total_ttc: totalTtc.toFixed(2),
+        tva_rate: 20
+      }).select().single();
+
+      if (invErr) throw invErr;
+
+      // Insérer les lignes
+      const itemsToInsert = state.items.map((item, i) => ({
+        invoice_id: invoice.id,
+        description: item.description,
+        quantity: item.quantity,
+        unit_price_ht: item.unit_price_ht,
+        tva_rate: item.tva_rate,
+        sort_order: i
+      }));
+      await supabase.from('invoice_items').insert(itemsToInsert);
+
+      // Incrémenter le compteur
+      await supabase.from('company_info').update({
+        next_invoice_number: company.next_invoice_number + 1
+      }).eq('id', company.id);
+
+      // Générer le PDF
+      const pdfBuffer = await generateInvoicePdf(invoice, company, client, state.items.map(item => ({
+        ...item,
+        total_ht: item.quantity * item.unit_price_ht,
+        total_tva: item.quantity * item.unit_price_ht * item.tva_rate / 100,
+        total_ttc: item.quantity * item.unit_price_ht * (1 + item.tva_rate / 100),
+        unit: 'unité'
+      })));
+
+      // Upload vers Supabase Storage
+      const storagePath = `factures/${dayjs().year()}/${invoiceNumber}.pdf`;
+      await supabase.storage.from('documents').upload(storagePath, pdfBuffer, {
+        contentType: 'application/pdf'
+      });
+
+      // Mettre à jour le chemin PDF
+      await supabase.from('invoices').update({ pdf_storage_path: storagePath }).eq('id', invoice.id);
+
+      // Envoyer le PDF via Telegram
+      bot.sendDocument(chatId, pdfBuffer, {
+        caption: `📄 *Facture ${invoiceNumber}*\n\n` +
+          `Client: ${client.company_name || client.first_name + ' ' + client.last_name}\n` +
+          `Total TTC: ${totalTtc.toFixed(2)} €\n` +
+          `Statut: Brouillon`,
+      }, {
+        filename: `${invoiceNumber}.pdf`,
+        contentType: 'application/pdf'
+      });
+
+      // Nettoyage
+      delete invoiceState[chatId];
+
+    } catch (err) {
+      console.error('[Telegram] Invoice error:', err);
+      bot.sendMessage(chatId, `❌ Erreur: ${err.message}`);
+    }
+  });
+
+  // ============================================
+  // Réception de documents (photos/PDF)
+  // ============================================
+  bot.on('photo', async (msg) => {
+    if (!isOwner(msg)) return;
+    await handleDocument(msg, 'photo');
+  });
+
+  bot.on('document', async (msg) => {
+    if (!isOwner(msg)) return;
+    if (msg.document) {
+      await handleDocument(msg, 'document');
+    }
+  });
+
+  async function handleDocument(msg, type) {
+    const chatId = msg.chat.id;
+    bot.sendMessage(chatId, '🔍 Analyse du document en cours...');
+
+    try {
+      let fileId, fileName, mimeType;
+
+      if (type === 'photo') {
+        const photo = msg.photo[msg.photo.length - 1]; // Plus haute résolution
+        fileId = photo.file_id;
+        fileName = `photo_${Date.now()}.jpg`;
+        mimeType = 'image/jpeg';
+      } else {
+        fileId = msg.document.file_id;
+        fileName = msg.document.file_name || `doc_${Date.now()}`;
+        mimeType = msg.document.mime_type || 'application/octet-stream';
+      }
+
+      // Télécharger le fichier
+      const fileLink = await bot.getFileLink(fileId);
+      const response = await fetch(fileLink);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const base64 = buffer.toString('base64');
+
+      // Classifier via IA
+      let classification;
+      if (mimeType.startsWith('image/')) {
+        classification = await classifyDocument(base64, mimeType, fileName);
+      } else {
+        // Pour les PDF, on envoie le nom comme indice
+        classification = await classifyDocument(
+          `Fichier: ${fileName}, Type: ${mimeType}, Taille: ${buffer.length} bytes`,
+          'text/plain',
+          fileName
+        );
+      }
+
+      // Sauvegarder dans Supabase Storage
+      const year = classification.date ? new Date(classification.date).getFullYear() : new Date().getFullYear();
+      const storagePath = `${classification.category}/${year}/${Date.now()}_${fileName}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from('documents')
+        .upload(storagePath, buffer, { contentType: mimeType });
+
+      if (uploadErr) throw uploadErr;
+
+      // Sauvegarder les métadonnées
+      const { error: dbErr } = await supabase.from('documents').insert({
+        category: classification.category || 'autre',
+        title: classification.title || fileName,
+        description: classification.description,
+        extracted_date: classification.date,
+        extracted_amount: classification.amount,
+        extracted_vendor: classification.vendor,
+        extracted_reference: classification.reference,
+        original_filename: fileName,
+        file_type: mimeType.split('/')[1] || 'unknown',
+        file_size: buffer.length,
+        storage_path: storagePath,
+        year: year,
+        month: classification.date ? new Date(classification.date).getMonth() + 1 : new Date().getMonth() + 1,
+        source: 'telegram',
+        telegram_file_id: fileId,
+        ai_classification_confidence: classification.confidence || 0,
+        ocr_text: classification.ocr_text || null
+      });
+
+      if (dbErr) throw dbErr;
+
+      const categoryLabels = {
+        facture_emise: '📄 Facture émise',
+        facture_recue: '📥 Facture reçue',
+        devis: '📋 Devis',
+        releve_bancaire: '🏦 Relevé bancaire',
+        fiscal: '🏛️ Document fiscal',
+        social_urssaf: '🏥 URSSAF/Social',
+        assurance: '🛡️ Assurance',
+        contrat: '📝 Contrat',
+        administratif: '📁 Administratif',
+        vehicule: '🚗 Véhicule',
+        ecommerce: '🛒 E-commerce',
+        autre: '📎 Autre'
+      };
+
+      bot.sendMessage(chatId,
+        `✅ *Document classifié et archivé*\n\n` +
+        `📂 ${categoryLabels[classification.category] || classification.category}\n` +
+        `📝 ${classification.title}\n` +
+        `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
+        `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
+        `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
+        `${classification.reference ? '🔢 Réf: ' + classification.reference : ''}\n` +
+        `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
+        `📁 Stocké: ${year}/${classification.category}`,
+        { parse_mode: 'Markdown' }
+      );
+
+    } catch (err) {
+      console.error('[Telegram] Document error:', err);
+      bot.sendMessage(chatId, `❌ Erreur lors du traitement: ${err.message}`);
+    }
+  }
+
+  // ============================================
+  // /docs - Rechercher des documents
+  // ============================================
+  bot.onText(/\/docs (.+)/, async (msg, match) => {
+    if (!isOwner(msg)) return;
+    const query = match[1].trim();
+
+    const { data: docs } = await supabase
+      .from('documents')
+      .select('*')
+      .or(`title.ilike.%${query}%,description.ilike.%${query}%,extracted_vendor.ilike.%${query}%,category.ilike.%${query}%`)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (!docs || docs.length === 0) {
+      return bot.sendMessage(msg.chat.id, `🔍 Aucun document trouvé pour "${query}"`);
+    }
+
+    const lines = docs.map((d, i) =>
+      `${i + 1}. *${d.title}*\n   📂 ${d.category} | 📅 ${d.extracted_date || d.year} | ${d.extracted_amount ? d.extracted_amount + ' €' : ''}`
+    ).join('\n\n');
+
+    bot.sendMessage(msg.chat.id, `🔍 *Résultats pour "${query}"*\n\n${lines}`, { parse_mode: 'Markdown' });
+  });
+
+  bot.onText(/^\/docs$/, (msg) => {
+    if (!isOwner(msg)) return;
+    bot.sendMessage(msg.chat.id, '🔍 Usage: `/docs mot-clé`\nExemple: `/docs uber` ou `/docs assurance`', { parse_mode: 'Markdown' });
+  });
+
+  console.log('[Telegram] Bot ready, owner ID:', OWNER_ID);
+}
+
+module.exports = { initBot };

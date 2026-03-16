@@ -1,0 +1,24 @@
+{
+  "name": "gestionnaire-ei-backend",
+  "version": "1.0.0",
+  "description": "Backend API + Telegram Bot pour gestion EI DIAMBRA BROU",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.49.1",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.13",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "pdfmake": "^0.2.15"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
