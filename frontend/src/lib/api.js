@@ -55,6 +55,7 @@ export const api = {
     return res.json();
   },
   updateDocument: (id, data) => request(`/documents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  reclassifyDocument: (id, category) => request(`/documents/${id}/reclassify`, { method: 'POST', body: JSON.stringify({ category }) }),
   deleteDocument: (id) => request(`/documents/${id}`, { method: 'DELETE' }),
   getDocumentDownloadUrl: (id) => `${API_BASE}/documents/${id}/download`,
 

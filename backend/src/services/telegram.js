@@ -1,11 +1,15 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { supabase } = require('./supabase');
-const { classifyDocument } = require('./ai');
+const { classifyDocument, CONFIDENCE_THRESHOLD } = require('./ai');
 const { generateInvoicePdf } = require('./pdf');
 const dayjs = require('dayjs');
 
 let bot;
 const OWNER_ID = Number(process.env.TELEGRAM_OWNER_ID);
+
+// Expose bot for external notifications (web uploads)
+function getBot() { return bot; }
+function getOwnerId() { return OWNER_ID; }
 
 function initBot() {
   bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
@@ -309,45 +313,7 @@ function initBot() {
   // ============================================
   const invoiceState = {};
 
-  bot.on('callback_query', async (query) => {
-    const chatId = query.message.chat.id;
-    const data = query.data;
-
-    if (data.startsWith('invoice_client_')) {
-      const clientId = data.replace('invoice_client_', '');
-      invoiceState[chatId] = { clientId, step: 'activity' };
-
-      bot.answerCallbackQuery(query.id);
-      bot.sendMessage(chatId, '🏷️ Activité de la facture ?', {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🚗 VTC', callback_data: 'invoice_act_vtc' }],
-            [{ text: '🛒 E-commerce', callback_data: 'invoice_act_ecommerce' }],
-            [{ text: '💻 Services numériques', callback_data: 'invoice_act_services_numeriques' }],
-          ]
-        }
-      });
-    }
-
-    if (data.startsWith('invoice_act_')) {
-      const activity = data.replace('invoice_act_', '');
-      if (invoiceState[chatId]) {
-        invoiceState[chatId].activity = activity;
-        invoiceState[chatId].step = 'items';
-        invoiceState[chatId].items = [];
-      }
-
-      bot.answerCallbackQuery(query.id);
-      bot.sendMessage(chatId,
-        `📝 *Ajoutez les lignes de facture*\n\nFormat:\n` +
-        `\`description | quantité | prix_unitaire_ht\`\n\n` +
-        `Exemple:\n` +
-        `\`Course VTC Paris-Orly | 1 | 65.00\`\n\n` +
-        `Envoyez chaque ligne séparément.\nTapez /valider quand terminé.`,
-        { parse_mode: 'Markdown' }
-      );
-    }
-  });
+  // Note: callback_query handler is unified below after document handling
 
   // ============================================
   // Réception des lignes de facture
@@ -493,6 +459,21 @@ function initBot() {
     }
   });
 
+  const categoryLabels = {
+    facture_emise: '📄 Facture émise',
+    facture_recue: '📥 Facture reçue',
+    devis: '📋 Devis',
+    releve_bancaire: '🏦 Relevé bancaire',
+    fiscal: '🏛️ Document fiscal',
+    social_urssaf: '🏥 URSSAF/Social',
+    assurance: '🛡️ Assurance',
+    contrat: '📝 Contrat',
+    administratif: '📁 Administratif',
+    vehicule: '🚗 Véhicule',
+    ecommerce: '🛒 E-commerce',
+    autre: '📎 Autre'
+  };
+
   async function handleDocument(msg, type) {
     const chatId = msg.chat.id;
     bot.sendMessage(chatId, '🔍 Analyse du document en cours...');
@@ -501,7 +482,7 @@ function initBot() {
       let fileId, fileName, mimeType;
 
       if (type === 'photo') {
-        const photo = msg.photo[msg.photo.length - 1]; // Plus haute résolution
+        const photo = msg.photo[msg.photo.length - 1];
         fileId = photo.file_id;
         fileName = `photo_${Date.now()}.jpg`;
         mimeType = 'image/jpeg';
@@ -517,12 +498,11 @@ function initBot() {
       const buffer = Buffer.from(await response.arrayBuffer());
       const base64 = buffer.toString('base64');
 
-      // Classifier via IA
+      // Classifier via IA (supporte images ET PDF natifs)
       let classification;
-      if (mimeType.startsWith('image/')) {
+      if (mimeType.startsWith('image/') || mimeType === 'application/pdf') {
         classification = await classifyDocument(base64, mimeType, fileName);
       } else {
-        // Pour les PDF, on envoie le nom comme indice
         classification = await classifyDocument(
           `Fichier: ${fileName}, Type: ${mimeType}, Taille: ${buffer.length} bytes`,
           'text/plain',
@@ -541,7 +521,7 @@ function initBot() {
       if (uploadErr) throw uploadErr;
 
       // Sauvegarder les métadonnées
-      const { error: dbErr } = await supabase.from('ei_documents').insert({
+      const { data: doc, error: dbErr } = await supabase.from('ei_documents').insert({
         category: classification.category || 'autre',
         title: classification.title || fileName,
         description: classification.description,
@@ -559,43 +539,141 @@ function initBot() {
         telegram_file_id: fileId,
         ai_classification_confidence: classification.confidence || 0,
         ocr_text: classification.ocr_text || null
-      });
+      }).select().single();
 
       if (dbErr) throw dbErr;
 
-      const categoryLabels = {
-        facture_emise: '📄 Facture émise',
-        facture_recue: '📥 Facture reçue',
-        devis: '📋 Devis',
-        releve_bancaire: '🏦 Relevé bancaire',
-        fiscal: '🏛️ Document fiscal',
-        social_urssaf: '🏥 URSSAF/Social',
-        assurance: '🛡️ Assurance',
-        contrat: '📝 Contrat',
-        administratif: '📁 Administratif',
-        vehicule: '🚗 Véhicule',
-        ecommerce: '🛒 E-commerce',
-        autre: '📎 Autre'
-      };
+      // Si confiance haute → confirmation simple
+      if (!classification.needs_review) {
+        bot.sendMessage(chatId,
+          `✅ *Document classifié et archivé*\n\n` +
+          `📂 ${categoryLabels[classification.category] || classification.category}\n` +
+          `📝 ${classification.title}\n` +
+          `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
+          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
+          `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
+          `${classification.reference ? '🔢 Réf: ' + classification.reference : ''}\n` +
+          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        // Confiance basse → demande de confirmation avec boutons
+        const suggestions = classification.suggested_categories || [];
+        const allCats = [...new Set([classification.category, ...suggestions])].filter(Boolean);
 
-      bot.sendMessage(chatId,
-        `✅ *Document classifié et archivé*\n\n` +
-        `📂 ${categoryLabels[classification.category] || classification.category}\n` +
-        `📝 ${classification.title}\n` +
-        `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
-        `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
-        `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
-        `${classification.reference ? '🔢 Réf: ' + classification.reference : ''}\n` +
-        `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
-        `📁 Stocké: ${year}/${classification.category}`,
-        { parse_mode: 'Markdown' }
-      );
+        const keyboard = allCats.map(cat => [{
+          text: `${categoryLabels[cat] || cat}`,
+          callback_data: `doc_reclass_${doc.id}_${cat}`
+        }]);
+
+        // Ajouter les catégories les plus courantes si pas déjà dedans
+        const commonCats = ['facture_recue', 'facture_emise', 'fiscal', 'administratif', 'autre'];
+        const extraCats = commonCats.filter(c => !allCats.includes(c));
+        for (let i = 0; i < extraCats.length && keyboard.length < 6; i++) {
+          keyboard.push([{
+            text: categoryLabels[extraCats[i]] || extraCats[i],
+            callback_data: `doc_reclass_${doc.id}_${extraCats[i]}`
+          }]);
+        }
+
+        keyboard.push([{ text: '✅ Garder: ' + (categoryLabels[classification.category] || classification.category), callback_data: `doc_confirm_${doc.id}` }]);
+
+        bot.sendMessage(chatId,
+          `⚠️ *Document classifié avec doute*\n\n` +
+          `📂 Suggestion: ${categoryLabels[classification.category] || classification.category}\n` +
+          `📝 ${classification.title}\n` +
+          `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
+          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
+          `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
+          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
+          `${classification.doubt_reason ? '\n❓ _' + classification.doubt_reason + '_' : ''}\n\n` +
+          `👇 *Choisis la bonne catégorie:*`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+        );
+      }
 
     } catch (err) {
       console.error('[Telegram] Document error:', err);
       bot.sendMessage(chatId, `❌ Erreur lors du traitement: ${err.message}`);
     }
   }
+
+  // ============================================
+  // Callbacks: reclassification de document
+  // ============================================
+  bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const data = query.data;
+
+    // Reclassifier un document
+    if (data.startsWith('doc_reclass_')) {
+      const parts = data.replace('doc_reclass_', '').split('_');
+      const docId = parts[0];
+      const newCategory = parts.slice(1).join('_');
+
+      const { error } = await supabase.from('ei_documents')
+        .update({ category: newCategory, ai_classification_confidence: 1.0 })
+        .eq('id', docId);
+
+      bot.answerCallbackQuery(query.id, { text: 'Catégorie mise à jour !' });
+
+      if (!error) {
+        bot.editMessageText(
+          `✅ *Document reclassifié*\n\n📂 ${categoryLabels[newCategory] || newCategory}\n\n_Classification corrigée manuellement_`,
+          { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+        );
+      }
+      return;
+    }
+
+    // Confirmer la classification IA
+    if (data.startsWith('doc_confirm_')) {
+      const docId = data.replace('doc_confirm_', '');
+
+      await supabase.from('ei_documents')
+        .update({ ai_classification_confidence: 1.0 })
+        .eq('id', docId);
+
+      bot.answerCallbackQuery(query.id, { text: 'Classification confirmée !' });
+      bot.editMessageText(
+        query.message.text.replace('⚠️ *Document classifié avec doute*', '✅ *Document confirmé et archivé*').replace('👇 *Choisis la bonne catégorie:*', '_Classification confirmée_'),
+        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    // Sélection client pour facture
+    if (data.startsWith('invoice_client_')) {
+      const clientId = data.replace('invoice_client_', '');
+      invoiceState[chatId] = { clientId, step: 'activity' };
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, '🏷️ Activité de la facture ?', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚗 VTC', callback_data: 'invoice_act_vtc' }],
+            [{ text: '🛒 E-commerce', callback_data: 'invoice_act_ecommerce' }],
+            [{ text: '💻 Services numériques', callback_data: 'invoice_act_services_numeriques' }],
+          ]
+        }
+      });
+      return;
+    }
+
+    if (data.startsWith('invoice_act_')) {
+      const activity = data.replace('invoice_act_', '');
+      if (invoiceState[chatId]) {
+        invoiceState[chatId].activity = activity;
+        invoiceState[chatId].step = 'items';
+        invoiceState[chatId].items = [];
+      }
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId,
+        `📝 *Ajoutez les lignes de facture*\n\nFormat:\n\`description | quantité | prix_unitaire_ht\`\n\nExemple:\n\`Course VTC Paris-Orly | 1 | 65.00\`\n\nEnvoyez chaque ligne séparément.\nTapez /valider quand terminé.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+  });
 
   // ============================================
   // /docs - Rechercher des documents
@@ -630,4 +708,4 @@ function initBot() {
   console.log('[Telegram] Bot ready, owner ID:', OWNER_ID);
 }
 
-module.exports = { initBot };
+module.exports = { initBot, getBot, getOwnerId };

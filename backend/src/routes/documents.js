@@ -1,10 +1,18 @@
 const { Router } = require('express');
 const { supabase } = require('../services/supabase');
-const { classifyDocument } = require('../services/ai');
+const { classifyDocument, CONFIDENCE_THRESHOLD } = require('../services/ai');
+const { getBot, getOwnerId } = require('../services/telegram');
 const multer = require('multer');
 const router = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+const CATEGORY_LABELS = {
+  facture_emise: 'Facture emise', facture_recue: 'Facture recue', devis: 'Devis',
+  releve_bancaire: 'Releve bancaire', fiscal: 'Document fiscal', social_urssaf: 'URSSAF/Social',
+  assurance: 'Assurance', contrat: 'Contrat', administratif: 'Administratif',
+  vehicule: 'Vehicule', ecommerce: 'E-commerce', autre: 'Autre'
+};
 
 // GET /api/documents
 router.get('/', async (req, res) => {
@@ -58,7 +66,7 @@ router.get('/:id/download', async (req, res) => {
   res.send(buffer);
 });
 
-// POST /api/documents/upload - Upload + classification IA
+// POST /api/documents/upload - Upload + classification IA + notification Telegram
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
@@ -66,9 +74,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const { buffer, mimetype, originalname, size } = req.file;
     const base64 = buffer.toString('base64');
 
-    // Classification IA
+    // Classification IA (supporte images ET PDF natifs)
     let classification;
-    if (mimetype.startsWith('image/')) {
+    if (mimetype.startsWith('image/') || mimetype === 'application/pdf') {
       classification = await classifyDocument(base64, mimetype, originalname);
     } else {
       classification = await classifyDocument(
@@ -109,10 +117,31 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
     if (dbErr) throw dbErr;
 
+    // Notification Telegram si confiance basse
+    if (classification.needs_review) {
+      notifyTelegramLowConfidence(doc, classification);
+    }
+
     res.status(201).json({ document: doc, classification });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// POST /api/documents/:id/reclassify - Changer manuellement la catégorie
+router.post('/:id/reclassify', async (req, res) => {
+  const { category } = req.body;
+  if (!category) return res.status(400).json({ error: 'category is required' });
+
+  const { data, error } = await supabase
+    .from('ei_documents')
+    .update({ category, ai_classification_confidence: 1.0 })
+    .eq('id', req.params.id)
+    .select()
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
 // PUT /api/documents/:id
@@ -129,7 +158,6 @@ router.put('/:id', async (req, res) => {
 
 // DELETE /api/documents/:id
 router.delete('/:id', async (req, res) => {
-  // Supprimer le fichier du storage aussi
   const { data: doc } = await supabase.from('ei_documents').select('storage_path').eq('id', req.params.id).single();
   if (doc) {
     await supabase.storage.from('ei-documents').remove([doc.storage_path]);
@@ -153,5 +181,57 @@ router.get('/stats/summary', async (req, res) => {
 
   res.json({ total: data.length, byCategory, byYear });
 });
+
+/**
+ * Envoie une notification Telegram quand un document uploadé via le web a une confiance basse
+ */
+function notifyTelegramLowConfidence(doc, classification) {
+  try {
+    const bot = getBot();
+    const ownerId = getOwnerId();
+    if (!bot || !ownerId) return;
+
+    const catLabels = {
+      facture_emise: '📄 Facture émise', facture_recue: '📥 Facture reçue', devis: '📋 Devis',
+      releve_bancaire: '🏦 Relevé bancaire', fiscal: '🏛️ Document fiscal', social_urssaf: '🏥 URSSAF/Social',
+      assurance: '🛡️ Assurance', contrat: '📝 Contrat', administratif: '📁 Administratif',
+      vehicule: '🚗 Véhicule', ecommerce: '🛒 E-commerce', autre: '📎 Autre'
+    };
+
+    const suggestions = classification.suggested_categories || [];
+    const allCats = [...new Set([classification.category, ...suggestions])].filter(Boolean);
+
+    const keyboard = allCats.map(cat => [{
+      text: catLabels[cat] || cat,
+      callback_data: `doc_reclass_${doc.id}_${cat}`
+    }]);
+
+    const commonCats = ['facture_recue', 'facture_emise', 'fiscal', 'administratif', 'autre'];
+    const extraCats = commonCats.filter(c => !allCats.includes(c));
+    for (let i = 0; i < extraCats.length && keyboard.length < 6; i++) {
+      keyboard.push([{
+        text: catLabels[extraCats[i]] || extraCats[i],
+        callback_data: `doc_reclass_${doc.id}_${extraCats[i]}`
+      }]);
+    }
+
+    keyboard.push([{
+      text: '✅ Garder: ' + (catLabels[classification.category] || classification.category),
+      callback_data: `doc_confirm_${doc.id}`
+    }]);
+
+    bot.sendMessage(ownerId,
+      `⚠️ *Document uploadé via le web - Doute IA*\n\n` +
+      `📝 ${classification.title || doc.original_filename}\n` +
+      `📂 Suggestion: ${catLabels[classification.category] || classification.category}\n` +
+      `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
+      `${classification.doubt_reason ? '❓ _' + classification.doubt_reason + '_' : ''}\n\n` +
+      `👇 *Choisis la bonne catégorie:*`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+    );
+  } catch (err) {
+    console.error('[Documents] Telegram notification error:', err.message);
+  }
+}
 
 module.exports = router;
