@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@stackforge-eu/factur-x": "^1.0.1",
     "@supabase/supabase-js": "^2.49.1",
     "cors": "^2.8.5",
     "dayjs": "^1.11.13",
