@@ -5,7 +5,7 @@ const router = Router();
 // GET /api/company
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('company_info')
+    .from('ei_company')
     .select('*')
     .limit(1)
     .single();
@@ -15,9 +15,9 @@ router.get('/', async (req, res) => {
 
 // PUT /api/company
 router.put('/', async (req, res) => {
-  const { data: current } = await supabase.from('company_info').select('id').limit(1).single();
+  const { data: current } = await supabase.from('ei_company').select('id').limit(1).single();
   const { data, error } = await supabase
-    .from('company_info')
+    .from('ei_company')
     .update(req.body)
     .eq('id', current.id)
     .select()

@@ -58,14 +58,14 @@ function initBot() {
     const endDate = now.format('YYYY-MM-DD');
 
     const { data: monthData } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('amount_ttc, activity')
       .eq('type', 'recette')
       .gte('date', startMonth)
       .lte('date', endDate);
 
     const { data: yearData } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('amount_ttc, activity')
       .eq('type', 'recette')
       .gte('date', startYear)
@@ -105,14 +105,14 @@ function initBot() {
     const year = now.year();
 
     const { data: collected } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('amount_tva')
       .eq('type', 'recette')
       .gte('date', now.startOf('month').format('YYYY-MM-DD'))
       .lte('date', now.endOf('month').format('YYYY-MM-DD'));
 
     const { data: deductible } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('amount_tva')
       .eq('type', 'depense')
       .gte('date', now.startOf('month').format('YYYY-MM-DD'))
@@ -141,7 +141,7 @@ function initBot() {
     const today = dayjs().format('YYYY-MM-DD');
 
     const { data: deadlines } = await supabase
-      .from('fiscal_deadlines')
+      .from('ei_fiscal_deadlines')
       .select('*')
       .gte('deadline_date', today)
       .eq('status', 'pending')
@@ -172,7 +172,7 @@ function initBot() {
     if (!isOwner(msg)) return;
 
     const { data: clients } = await supabase
-      .from('clients')
+      .from('ei_clients')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(20);
@@ -216,7 +216,7 @@ function initBot() {
     const amountHt = amountTtc / (1 + tvaRate / 100);
     const amountTva = amountTtc - amountHt;
 
-    const { error } = await supabase.from('transactions').insert({
+    const { error } = await supabase.from('ei_transactions').insert({
       type: 'recette',
       activity,
       date: dayjs().format('YYYY-MM-DD'),
@@ -254,7 +254,7 @@ function initBot() {
     const amountHt = amountTtc / (1 + tvaRate / 100);
     const amountTva = amountTtc - amountHt;
 
-    const { error } = await supabase.from('transactions').insert({
+    const { error } = await supabase.from('ei_transactions').insert({
       type: 'depense',
       activity: 'general',
       date: dayjs().format('YYYY-MM-DD'),
@@ -288,7 +288,7 @@ function initBot() {
     if (!isOwner(msg)) return;
 
     const { data: clients } = await supabase
-      .from('clients')
+      .from('ei_clients')
       .select('id, company_name, first_name, last_name, type')
       .order('company_name');
 
@@ -393,11 +393,11 @@ function initBot() {
 
     try {
       // Récupérer infos entreprise
-      const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+      const { data: companyArr } = await supabase.from('ei_company').select('*').limit(1);
       const company = companyArr[0];
 
       // Récupérer client
-      const { data: clientArr } = await supabase.from('clients').select('*').eq('id', state.clientId);
+      const { data: clientArr } = await supabase.from('ei_clients').select('*').eq('id', state.clientId);
       const client = clientArr[0];
 
       // Numéro de facture
@@ -409,7 +409,7 @@ function initBot() {
       const totalTtc = totalHt + totalTva;
 
       // Créer la facture en BDD
-      const { data: invoice, error: invErr } = await supabase.from('invoices').insert({
+      const { data: invoice, error: invErr } = await supabase.from('ei_invoices').insert({
         invoice_number: invoiceNumber,
         client_id: state.clientId,
         status: 'draft',
@@ -433,10 +433,10 @@ function initBot() {
         tva_rate: item.tva_rate,
         sort_order: i
       }));
-      await supabase.from('invoice_items').insert(itemsToInsert);
+      await supabase.from('ei_invoice_items').insert(itemsToInsert);
 
       // Incrémenter le compteur
-      await supabase.from('company_info').update({
+      await supabase.from('ei_company').update({
         next_invoice_number: company.next_invoice_number + 1
       }).eq('id', company.id);
 
@@ -451,12 +451,12 @@ function initBot() {
 
       // Upload vers Supabase Storage
       const storagePath = `factures/${dayjs().year()}/${invoiceNumber}.pdf`;
-      await supabase.storage.from('documents').upload(storagePath, pdfBuffer, {
+      await supabase.storage.from('ei-documents').upload(storagePath, pdfBuffer, {
         contentType: 'application/pdf'
       });
 
       // Mettre à jour le chemin PDF
-      await supabase.from('invoices').update({ pdf_storage_path: storagePath }).eq('id', invoice.id);
+      await supabase.from('ei_invoices').update({ pdf_storage_path: storagePath }).eq('id', invoice.id);
 
       // Envoyer le PDF via Telegram
       bot.sendDocument(chatId, pdfBuffer, {
@@ -535,13 +535,13 @@ function initBot() {
       const storagePath = `${classification.category}/${year}/${Date.now()}_${fileName}`;
 
       const { error: uploadErr } = await supabase.storage
-        .from('documents')
+        .from('ei-documents')
         .upload(storagePath, buffer, { contentType: mimeType });
 
       if (uploadErr) throw uploadErr;
 
       // Sauvegarder les métadonnées
-      const { error: dbErr } = await supabase.from('documents').insert({
+      const { error: dbErr } = await supabase.from('ei_documents').insert({
         category: classification.category || 'autre',
         title: classification.title || fileName,
         description: classification.description,
@@ -605,7 +605,7 @@ function initBot() {
     const query = match[1].trim();
 
     const { data: docs } = await supabase
-      .from('documents')
+      .from('ei_documents')
       .select('*')
       .or(`title.ilike.%${query}%,description.ilike.%${query}%,extracted_vendor.ilike.%${query}%,category.ilike.%${query}%`)
       .order('created_at', { ascending: false })

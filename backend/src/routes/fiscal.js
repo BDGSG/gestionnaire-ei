@@ -5,7 +5,7 @@ const router = Router();
 // GET /api/fiscal/deadlines
 router.get('/deadlines', async (req, res) => {
   let query = supabase
-    .from('fiscal_deadlines')
+    .from('ei_fiscal_deadlines')
     .select('*')
     .order('deadline_date');
 
@@ -20,7 +20,7 @@ router.get('/deadlines', async (req, res) => {
 // PUT /api/fiscal/deadlines/:id
 router.put('/deadlines/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('fiscal_deadlines')
+    .from('ei_fiscal_deadlines')
     .update(req.body)
     .eq('id', req.params.id)
     .select()
@@ -32,7 +32,7 @@ router.put('/deadlines/:id', async (req, res) => {
 // POST /api/fiscal/deadlines
 router.post('/deadlines', async (req, res) => {
   const { data, error } = await supabase
-    .from('fiscal_deadlines')
+    .from('ei_fiscal_deadlines')
     .insert(req.body)
     .select()
     .single();
@@ -45,14 +45,14 @@ router.get('/tva-summary', async (req, res) => {
   const year = req.query.year || new Date().getFullYear();
 
   const { data: recettes } = await supabase
-    .from('transactions')
+    .from('ei_transactions')
     .select('amount_tva, date')
     .eq('type', 'recette')
     .gte('date', `${year}-01-01`)
     .lte('date', `${year}-12-31`);
 
   const { data: depenses } = await supabase
-    .from('transactions')
+    .from('ei_transactions')
     .select('amount_tva, date')
     .eq('type', 'depense')
     .gte('date', `${year}-01-01`)

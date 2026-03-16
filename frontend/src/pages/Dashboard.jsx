@@ -80,7 +80,7 @@ export default function Dashboard() {
                   <div>
                     <p className="text-sm font-medium">{inv.invoice_number}</p>
                     <p className="text-xs text-gray-500">
-                      {inv.clients?.company_name || `${inv.clients?.first_name || ''} ${inv.clients?.last_name || ''}`}
+                      {inv.ei_clients?.company_name || `${inv.ei_clients?.first_name || ''} ${inv.ei_clients?.last_name || ''}`}
                     </p>
                   </div>
                   <div className="text-right">

@@ -6,8 +6,8 @@ const router = Router();
 // GET /api/quotes
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('quotes')
-    .select('*, clients(company_name, first_name, last_name)')
+    .from('ei_quotes')
+    .select('*, ei_clients(company_name, first_name, last_name)')
     .order('issue_date', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
@@ -16,14 +16,14 @@ router.get('/', async (req, res) => {
 // GET /api/quotes/:id
 router.get('/:id', async (req, res) => {
   const { data: quote, error } = await supabase
-    .from('quotes')
-    .select('*, clients(*)')
+    .from('ei_quotes')
+    .select('*, ei_clients(*)')
     .eq('id', req.params.id)
     .single();
   if (error) return res.status(404).json({ error: error.message });
 
   const { data: items } = await supabase
-    .from('quote_items')
+    .from('ei_quote_items')
     .select('*')
     .eq('quote_id', req.params.id)
     .order('sort_order');
@@ -36,7 +36,7 @@ router.post('/', async (req, res) => {
   try {
     const { items, ...quoteData } = req.body;
 
-    const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+    const { data: companyArr } = await supabase.from('ei_company').select('*').limit(1);
     const company = companyArr[0];
 
     const quoteNumber = `${company.quote_prefix}-${dayjs().format('YYYY')}-${String(company.next_quote_number).padStart(4, '0')}`;
@@ -46,7 +46,7 @@ router.post('/', async (req, res) => {
     const totalTva = totalHt * tvaRate / 100;
     const totalTtc = totalHt + totalTva;
 
-    const { data: quote, error } = await supabase.from('quotes').insert({
+    const { data: quote, error } = await supabase.from('ei_quotes').insert({
       ...quoteData,
       quote_number: quoteNumber,
       total_ht: totalHt.toFixed(2),
@@ -59,7 +59,7 @@ router.post('/', async (req, res) => {
     if (error) throw error;
 
     if (items && items.length > 0) {
-      await supabase.from('quote_items').insert(
+      await supabase.from('ei_quote_items').insert(
         items.map((item, i) => ({
           quote_id: quote.id,
           description: item.description,
@@ -72,7 +72,7 @@ router.post('/', async (req, res) => {
       );
     }
 
-    await supabase.from('company_info').update({
+    await supabase.from('ei_company').update({
       next_quote_number: company.next_quote_number + 1
     }).eq('id', company.id);
 
@@ -85,14 +85,14 @@ router.post('/', async (req, res) => {
 // POST /api/quotes/:id/convert - Convertir devis en facture
 router.post('/:id/convert', async (req, res) => {
   try {
-    const { data: quote } = await supabase.from('quotes').select('*').eq('id', req.params.id).single();
-    const { data: items } = await supabase.from('quote_items').select('*').eq('quote_id', req.params.id);
-    const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+    const { data: quote } = await supabase.from('ei_quotes').select('*').eq('id', req.params.id).single();
+    const { data: items } = await supabase.from('ei_quote_items').select('*').eq('quote_id', req.params.id);
+    const { data: companyArr } = await supabase.from('ei_company').select('*').limit(1);
     const company = companyArr[0];
 
     const invoiceNumber = `${company.invoice_prefix}-${dayjs().format('YYYY')}-${String(company.next_invoice_number).padStart(4, '0')}`;
 
-    const { data: invoice, error } = await supabase.from('invoices').insert({
+    const { data: invoice, error } = await supabase.from('ei_invoices').insert({
       invoice_number: invoiceNumber,
       client_id: quote.client_id,
       status: 'draft',
@@ -110,7 +110,7 @@ router.post('/:id/convert', async (req, res) => {
 
     // Copier les lignes
     if (items) {
-      await supabase.from('invoice_items').insert(
+      await supabase.from('ei_invoice_items').insert(
         items.map(item => ({
           invoice_id: invoice.id,
           description: item.description,
@@ -124,12 +124,12 @@ router.post('/:id/convert', async (req, res) => {
     }
 
     // Marquer le devis comme facturé
-    await supabase.from('quotes').update({
+    await supabase.from('ei_quotes').update({
       status: 'invoiced',
       converted_invoice_id: invoice.id
     }).eq('id', req.params.id);
 
-    await supabase.from('company_info').update({
+    await supabase.from('ei_company').update({
       next_invoice_number: company.next_invoice_number + 1
     }).eq('id', company.id);
 

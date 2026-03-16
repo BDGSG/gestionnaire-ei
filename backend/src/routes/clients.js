@@ -5,7 +5,7 @@ const router = Router();
 // GET /api/clients
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('clients')
+    .from('ei_clients')
     .select('*')
     .order('created_at', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
@@ -15,7 +15,7 @@ router.get('/', async (req, res) => {
 // GET /api/clients/:id
 router.get('/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('clients')
+    .from('ei_clients')
     .select('*')
     .eq('id', req.params.id)
     .single();
@@ -26,7 +26,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/clients
 router.post('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('clients')
+    .from('ei_clients')
     .insert(req.body)
     .select()
     .single();
@@ -37,7 +37,7 @@ router.post('/', async (req, res) => {
 // PUT /api/clients/:id
 router.put('/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('clients')
+    .from('ei_clients')
     .update(req.body)
     .eq('id', req.params.id)
     .select()
@@ -49,7 +49,7 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/clients/:id
 router.delete('/:id', async (req, res) => {
   const { error } = await supabase
-    .from('clients')
+    .from('ei_clients')
     .delete()
     .eq('id', req.params.id);
   if (error) return res.status(400).json({ error: error.message });

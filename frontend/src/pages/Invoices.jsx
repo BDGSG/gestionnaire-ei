@@ -84,7 +84,7 @@ export default function Invoices() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {invoices.map(inv => {
-                const clientName = inv.clients?.company_name || `${inv.clients?.first_name || ''} ${inv.clients?.last_name || ''}`.trim();
+                const clientName = inv.ei_clients?.company_name || `${inv.ei_clients?.first_name || ''} ${inv.ei_clients?.last_name || ''}`.trim();
                 return (
                   <tr key={inv.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium">{inv.invoice_number}</td>

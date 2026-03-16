@@ -14,28 +14,28 @@ router.get('/', async (req, res) => {
 
     // Transactions du mois
     const { data: monthTx } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('type, amount_ttc, amount_tva, activity')
       .gte('date', startMonth)
       .lte('date', endMonth);
 
     // Transactions de l'année
     const { data: yearTx } = await supabase
-      .from('transactions')
+      .from('ei_transactions')
       .select('type, amount_ttc, amount_tva, amount_ht, activity, date')
       .gte('date', startYear)
       .lte('date', endYear);
 
     // Factures impayées
     const { data: unpaidInvoices } = await supabase
-      .from('invoices')
-      .select('id, invoice_number, total_ttc, due_date, clients(company_name, first_name, last_name)')
+      .from('ei_invoices')
+      .select('id, invoice_number, total_ttc, due_date, ei_clients(company_name, first_name, last_name)')
       .in('status', ['sent', 'overdue'])
       .order('due_date');
 
     // Prochaines échéances
     const { data: deadlines } = await supabase
-      .from('fiscal_deadlines')
+      .from('ei_fiscal_deadlines')
       .select('*')
       .gte('deadline_date', now.format('YYYY-MM-DD'))
       .eq('status', 'pending')
@@ -44,7 +44,7 @@ router.get('/', async (req, res) => {
 
     // Documents récents
     const { data: recentDocs } = await supabase
-      .from('documents')
+      .from('ei_documents')
       .select('id, title, category, extracted_date, created_at')
       .order('created_at', { ascending: false })
       .limit(5);

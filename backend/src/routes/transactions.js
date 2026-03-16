@@ -5,8 +5,8 @@ const router = Router();
 // GET /api/transactions
 router.get('/', async (req, res) => {
   let query = supabase
-    .from('transactions')
-    .select('*, clients(company_name, first_name, last_name)')
+    .from('ei_transactions')
+    .select('*, ei_clients(company_name, first_name, last_name)')
     .order('date', { ascending: false });
 
   if (req.query.type) query = query.eq('type', req.query.type);
@@ -28,7 +28,7 @@ router.get('/', async (req, res) => {
 // POST /api/transactions
 router.post('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('transactions')
+    .from('ei_transactions')
     .insert(req.body)
     .select()
     .single();
@@ -39,7 +39,7 @@ router.post('/', async (req, res) => {
 // PUT /api/transactions/:id
 router.put('/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('transactions')
+    .from('ei_transactions')
     .update(req.body)
     .eq('id', req.params.id)
     .select()
@@ -50,7 +50,7 @@ router.put('/:id', async (req, res) => {
 
 // DELETE /api/transactions/:id
 router.delete('/:id', async (req, res) => {
-  const { error } = await supabase.from('transactions').delete().eq('id', req.params.id);
+  const { error } = await supabase.from('ei_transactions').delete().eq('id', req.params.id);
   if (error) return res.status(400).json({ error: error.message });
   res.json({ success: true });
 });
@@ -59,8 +59,8 @@ router.delete('/:id', async (req, res) => {
 router.get('/livre-recettes', async (req, res) => {
   const year = req.query.year || new Date().getFullYear();
   const { data, error } = await supabase
-    .from('transactions')
-    .select('*, clients(company_name, first_name, last_name)')
+    .from('ei_transactions')
+    .select('*, ei_clients(company_name, first_name, last_name)')
     .eq('type', 'recette')
     .gte('date', `${year}-01-01`)
     .lte('date', `${year}-12-31`)

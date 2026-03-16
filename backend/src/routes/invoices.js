@@ -7,8 +7,8 @@ const router = Router();
 // GET /api/invoices
 router.get('/', async (req, res) => {
   const query = supabase
-    .from('invoices')
-    .select('*, clients(company_name, first_name, last_name)')
+    .from('ei_invoices')
+    .select('*, ei_clients(company_name, first_name, last_name)')
     .order('issue_date', { ascending: false });
 
   if (req.query.status) query.eq('status', req.query.status);
@@ -26,14 +26,14 @@ router.get('/', async (req, res) => {
 // GET /api/invoices/:id
 router.get('/:id', async (req, res) => {
   const { data: invoice, error } = await supabase
-    .from('invoices')
-    .select('*, clients(*)')
+    .from('ei_invoices')
+    .select('*, ei_clients(*)')
     .eq('id', req.params.id)
     .single();
   if (error) return res.status(404).json({ error: error.message });
 
   const { data: items } = await supabase
-    .from('invoice_items')
+    .from('ei_invoice_items')
     .select('*')
     .eq('invoice_id', req.params.id)
     .order('sort_order');
@@ -47,7 +47,7 @@ router.post('/', async (req, res) => {
     const { items, ...invoiceData } = req.body;
 
     // Récupérer le prochain numéro
-    const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+    const { data: companyArr } = await supabase.from('ei_company').select('*').limit(1);
     const company = companyArr[0];
 
     const invoiceNumber = `${company.invoice_prefix}-${dayjs().format('YYYY')}-${String(company.next_invoice_number).padStart(4, '0')}`;
@@ -58,7 +58,7 @@ router.post('/', async (req, res) => {
     const totalTva = totalHt * tvaRate / 100;
     const totalTtc = totalHt + totalTva;
 
-    const { data: invoice, error } = await supabase.from('invoices').insert({
+    const { data: invoice, error } = await supabase.from('ei_invoices').insert({
       ...invoiceData,
       invoice_number: invoiceNumber,
       total_ht: totalHt.toFixed(2),
@@ -72,7 +72,7 @@ router.post('/', async (req, res) => {
 
     // Insérer les lignes
     if (items && items.length > 0) {
-      await supabase.from('invoice_items').insert(
+      await supabase.from('ei_invoice_items').insert(
         items.map((item, i) => ({
           invoice_id: invoice.id,
           description: item.description,
@@ -86,7 +86,7 @@ router.post('/', async (req, res) => {
     }
 
     // Incrémenter compteur
-    await supabase.from('company_info').update({
+    await supabase.from('ei_company').update({
       next_invoice_number: company.next_invoice_number + 1
     }).eq('id', company.id);
 
@@ -109,8 +109,8 @@ router.put('/:id', async (req, res) => {
     invoiceData.total_ttc = (totalHt * (1 + tvaRate / 100)).toFixed(2);
 
     // Remplacer les lignes
-    await supabase.from('invoice_items').delete().eq('invoice_id', req.params.id);
-    await supabase.from('invoice_items').insert(
+    await supabase.from('ei_invoice_items').delete().eq('invoice_id', req.params.id);
+    await supabase.from('ei_invoice_items').insert(
       items.map((item, i) => ({
         invoice_id: req.params.id,
         description: item.description,
@@ -124,7 +124,7 @@ router.put('/:id', async (req, res) => {
   }
 
   const { data, error } = await supabase
-    .from('invoices')
+    .from('ei_invoices')
     .update(invoiceData)
     .eq('id', req.params.id)
     .select()
@@ -137,11 +137,11 @@ router.put('/:id', async (req, res) => {
 // GET /api/invoices/:id/pdf
 router.get('/:id/pdf', async (req, res) => {
   try {
-    const { data: invoice } = await supabase.from('invoices').select('*, clients(*)').eq('id', req.params.id).single();
-    const { data: items } = await supabase.from('invoice_items').select('*').eq('invoice_id', req.params.id).order('sort_order');
-    const { data: companyArr } = await supabase.from('company_info').select('*').limit(1);
+    const { data: invoice } = await supabase.from('ei_invoices').select('*, ei_clients(*)').eq('id', req.params.id).single();
+    const { data: items } = await supabase.from('ei_invoice_items').select('*').eq('invoice_id', req.params.id).order('sort_order');
+    const { data: companyArr } = await supabase.from('ei_company').select('*').limit(1);
 
-    const pdfBuffer = await generateInvoicePdf(invoice, companyArr[0], invoice.clients, items);
+    const pdfBuffer = await generateInvoicePdf(invoice, companyArr[0], invoice.ei_clients, items);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${invoice.invoice_number}.pdf"`);
@@ -154,7 +154,7 @@ router.get('/:id/pdf', async (req, res) => {
 // POST /api/invoices/:id/mark-paid
 router.post('/:id/mark-paid', async (req, res) => {
   const { data, error } = await supabase
-    .from('invoices')
+    .from('ei_invoices')
     .update({
       status: 'paid',
       payment_date: req.body.payment_date || dayjs().format('YYYY-MM-DD'),
@@ -167,7 +167,7 @@ router.post('/:id/mark-paid', async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   // Créer la transaction recette associée
-  await supabase.from('transactions').insert({
+  await supabase.from('ei_transactions').insert({
     type: 'recette',
     activity: data.activity,
     date: data.payment_date || dayjs().format('YYYY-MM-DD'),

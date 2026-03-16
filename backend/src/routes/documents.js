@@ -9,7 +9,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 // GET /api/documents
 router.get('/', async (req, res) => {
   let query = supabase
-    .from('documents')
+    .from('ei_documents')
     .select('*')
     .order('created_at', { ascending: false });
 
@@ -28,7 +28,7 @@ router.get('/', async (req, res) => {
 // GET /api/documents/:id
 router.get('/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('documents')
+    .from('ei_documents')
     .select('*')
     .eq('id', req.params.id)
     .single();
@@ -39,7 +39,7 @@ router.get('/:id', async (req, res) => {
 // GET /api/documents/:id/download
 router.get('/:id/download', async (req, res) => {
   const { data: doc } = await supabase
-    .from('documents')
+    .from('ei_documents')
     .select('storage_path, original_filename, file_type')
     .eq('id', req.params.id)
     .single();
@@ -47,7 +47,7 @@ router.get('/:id/download', async (req, res) => {
   if (!doc) return res.status(404).json({ error: 'Document not found' });
 
   const { data, error } = await supabase.storage
-    .from('documents')
+    .from('ei-documents')
     .download(doc.storage_path);
 
   if (error) return res.status(500).json({ error: error.message });
@@ -83,13 +83,13 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const storagePath = `${classification.category}/${year}/${Date.now()}_${originalname}`;
 
     const { error: uploadErr } = await supabase.storage
-      .from('documents')
+      .from('ei-documents')
       .upload(storagePath, buffer, { contentType: mimetype });
 
     if (uploadErr) throw uploadErr;
 
     // BDD
-    const { data: doc, error: dbErr } = await supabase.from('documents').insert({
+    const { data: doc, error: dbErr } = await supabase.from('ei_documents').insert({
       category: req.body.category || classification.category || 'autre',
       title: req.body.title || classification.title || originalname,
       description: classification.description,
@@ -118,7 +118,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 // PUT /api/documents/:id
 router.put('/:id', async (req, res) => {
   const { data, error } = await supabase
-    .from('documents')
+    .from('ei_documents')
     .update(req.body)
     .eq('id', req.params.id)
     .select()
@@ -130,18 +130,18 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/documents/:id
 router.delete('/:id', async (req, res) => {
   // Supprimer le fichier du storage aussi
-  const { data: doc } = await supabase.from('documents').select('storage_path').eq('id', req.params.id).single();
+  const { data: doc } = await supabase.from('ei_documents').select('storage_path').eq('id', req.params.id).single();
   if (doc) {
-    await supabase.storage.from('documents').remove([doc.storage_path]);
+    await supabase.storage.from('ei-documents').remove([doc.storage_path]);
   }
-  const { error } = await supabase.from('documents').delete().eq('id', req.params.id);
+  const { error } = await supabase.from('ei_documents').delete().eq('id', req.params.id);
   if (error) return res.status(400).json({ error: error.message });
   res.json({ success: true });
 });
 
 // GET /api/documents/stats/summary
 router.get('/stats/summary', async (req, res) => {
-  const { data, error } = await supabase.from('documents').select('category, year');
+  const { data, error } = await supabase.from('ei_documents').select('category, year');
   if (error) return res.status(500).json({ error: error.message });
 
   const byCategory = {};
