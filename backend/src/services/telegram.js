@@ -14,8 +14,33 @@ const OWNER_ID = Number(process.env.TELEGRAM_OWNER_ID);
 function getBot() { return bot; }
 function getOwnerId() { return OWNER_ID; }
 
+// Safe send: try Markdown first, fallback to plain text if parsing fails
+async function safeSend(chatId, text, opts = {}) {
+  try {
+    return await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', ...opts });
+  } catch (err) {
+    if (err.message && err.message.includes("can't parse entities")) {
+      // Strip markdown and retry as plain text
+      const plain = text.replace(/[*_`\[\]]/g, '');
+      return await bot.sendMessage(chatId, plain, { ...opts, parse_mode: undefined });
+    }
+    throw err;
+  }
+}
+
 function initBot() {
-  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+    polling: { params: { timeout: 30 } }
+  });
+
+  // Log polling errors but don't crash
+  bot.on('polling_error', (err) => {
+    if (err.code === 'ETELEGRAM' && err.message.includes('409')) {
+      console.warn('[Telegram] 409 Conflict - another instance may be running. Retrying...');
+    } else {
+      console.error('[Telegram] Polling error:', err.message);
+    }
+  });
 
   // Vérifier que c'est le propriétaire
   function isOwner(msg) {
@@ -547,18 +572,20 @@ function initBot() {
 
       if (dbErr) throw dbErr;
 
+      // Escape markdown special chars in AI-generated strings
+      const esc = (s) => s ? String(s).replace(/([*_`\[\]])/g, '\\$1') : '';
+
       // Si confiance haute → confirmation simple
       if (!classification.needs_review) {
-        bot.sendMessage(chatId,
+        await safeSend(chatId,
           `✅ *Document classifié et archivé*\n\n` +
           `📂 ${categoryLabels[classification.category] || classification.category}\n` +
-          `📝 ${classification.title}\n` +
+          `📝 ${esc(classification.title)}\n` +
           `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
           `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
-          `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
-          `${classification.reference ? '🔢 Réf: ' + classification.reference : ''}\n` +
-          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%`,
-          { parse_mode: 'Markdown' }
+          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) : ''}\n` +
+          `${classification.reference ? '🔢 Réf: ' + esc(classification.reference) : ''}\n` +
+          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%`
         );
       } else {
         // Confiance basse → demande de confirmation avec boutons
@@ -582,23 +609,23 @@ function initBot() {
 
         keyboard.push([{ text: '✅ Garder: ' + (categoryLabels[classification.category] || classification.category), callback_data: `doc_confirm_${doc.id}` }]);
 
-        bot.sendMessage(chatId,
+        await safeSend(chatId,
           `⚠️ *Document classifié avec doute*\n\n` +
           `📂 Suggestion: ${categoryLabels[classification.category] || classification.category}\n` +
-          `📝 ${classification.title}\n` +
+          `📝 ${esc(classification.title)}\n` +
           `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
           `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
-          `${classification.vendor ? '🏢 Émetteur: ' + classification.vendor : ''}\n` +
+          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) : ''}\n` +
           `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
-          `${classification.doubt_reason ? '\n❓ _' + classification.doubt_reason + '_' : ''}\n\n` +
+          `${classification.doubt_reason ? '\n❓ ' + esc(classification.doubt_reason) : ''}\n\n` +
           `👇 *Choisis la bonne catégorie:*`,
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+          { reply_markup: { inline_keyboard: keyboard } }
         );
       }
 
     } catch (err) {
       console.error('[Telegram] Document error:', err);
-      bot.sendMessage(chatId, `❌ Erreur lors du traitement: ${err.message}`);
+      bot.sendMessage(chatId, `❌ Erreur lors du traitement: ${String(err.message).substring(0, 200)}`).catch(() => {});
     }
   }
 

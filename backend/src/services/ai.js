@@ -7,8 +7,8 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const CONFIDENCE_THRESHOLD = 0.7;
 
 // Models
-const FAST_MODEL = 'anthropic/claude-haiku-4-5-20251001'; // Fast + cheap for classification
-const SMART_MODEL = 'anthropic/claude-sonnet-4-6';        // Smart for regulatory analysis
+const FAST_MODEL = 'anthropic/claude-haiku-4-5';   // Fast + cheap for classification
+const SMART_MODEL = 'anthropic/claude-sonnet-4-5';  // Smart for regulatory analysis
 
 function getApiKey() {
   return process.env.OPENROUTER_API_KEY || process.env.ANTHROPIC_API_KEY;
