@@ -72,6 +72,25 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
     const { buffer, mimetype, originalname, size } = req.file;
+
+    // Anti-doublon par hash
+    const crypto = require('crypto');
+    const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+
+    const { data: duplicates } = await supabase
+      .from('ei_documents')
+      .select('id, title, category, extracted_date')
+      .eq('file_hash', fileHash)
+      .limit(1);
+
+    if (duplicates && duplicates.length > 0) {
+      return res.status(409).json({
+        error: 'duplicate',
+        message: 'Ce document existe déjà',
+        existing: duplicates[0]
+      });
+    }
+
     const base64 = buffer.toString('base64');
 
     // Classification IA (supporte images ET PDF natifs)
@@ -112,7 +131,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       year,
       month: classification.date ? new Date(classification.date).getMonth() + 1 : new Date().getMonth() + 1,
       source: 'web',
-      ai_classification_confidence: classification.confidence || 0
+      ai_classification_confidence: classification.confidence || 0,
+      file_hash: fileHash
     }).select().single();
 
     if (dbErr) throw dbErr;

@@ -530,7 +530,33 @@ function initBot() {
       const response = await fetch(fileLink);
       const buffer = Buffer.from(await response.arrayBuffer());
       const base64 = buffer.toString('base64');
-      console.log(`[Telegram] Downloaded ${buffer.length} bytes, classifying...`);
+      console.log(`[Telegram] Downloaded ${buffer.length} bytes`);
+
+      // --- Anti-doublon : hash du fichier ---
+      const crypto = require('crypto');
+      const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+
+      const { data: duplicates } = await supabase
+        .from('ei_documents')
+        .select('id, title, category, extracted_date, created_at')
+        .eq('file_hash', fileHash)
+        .limit(1);
+
+      if (duplicates && duplicates.length > 0) {
+        const dup = duplicates[0];
+        const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
+        await safeSend(chatId,
+          `⚠️ *Doublon détecté !*\n\n` +
+          `Ce document existe déjà :\n` +
+          `📝 ${dup.title}\n` +
+          `📂 ${categoryLabels[dup.category] || dup.category}\n` +
+          `📅 ${dupDate}\n\n` +
+          `Le document n'a pas été ajouté une 2ème fois.`
+        );
+        return;
+      }
+
+      console.log(`[Telegram] No duplicate found (hash: ${fileHash.substring(0, 12)}...), classifying...`);
 
       // Classifier via IA (supporte images ET PDF natifs)
       let classification;
@@ -573,7 +599,8 @@ function initBot() {
         source: 'telegram',
         telegram_file_id: fileId,
         ai_classification_confidence: classification.confidence || 0,
-        ocr_text: classification.ocr_text || null
+        ocr_text: classification.ocr_text || null,
+        file_hash: fileHash
       }).select().single();
 
       if (dbErr) throw dbErr;
