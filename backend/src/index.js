@@ -51,9 +51,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`[Server] Running on port ${PORT}`);
   // Init Telegram bot
-  initBot();
+  await initBot();
   console.log('[Telegram] Bot initialized');
 });

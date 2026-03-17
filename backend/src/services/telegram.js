@@ -28,15 +28,28 @@ async function safeSend(chatId, text, opts = {}) {
   }
 }
 
-function initBot() {
-  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-    polling: { params: { timeout: 30 } }
-  });
+async function initBot() {
+  // Create bot WITHOUT auto-polling first
+  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
+
+  // Clear any webhook + stop competing polling sessions
+  try {
+    await bot.deleteWebHook({ drop_pending_updates: false });
+    console.log('[Telegram] Webhook cleared, starting polling...');
+  } catch (err) {
+    console.warn('[Telegram] deleteWebhook error (non-fatal):', err.message);
+  }
+
+  // Small delay to let Telegram release the getUpdates lock
+  await new Promise(r => setTimeout(r, 2000));
+
+  // NOW start polling
+  bot.startPolling({ params: { timeout: 30 } });
 
   // Log polling errors but don't crash
   bot.on('polling_error', (err) => {
     if (err.code === 'ETELEGRAM' && err.message.includes('409')) {
-      console.warn('[Telegram] 409 Conflict - another instance may be running. Retrying...');
+      console.warn('[Telegram] 409 Conflict - will resolve on next poll cycle');
     } else {
       console.error('[Telegram] Polling error:', err.message);
     }

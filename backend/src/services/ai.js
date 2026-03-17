@@ -30,24 +30,42 @@ async function callOpenRouter(model, messages, { maxTokens = 600, system } = {})
   }
   body.messages.push(...messages);
 
-  const res = await fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.APP_URL || 'https://gestionnaire-ei.coolify.inkora.art',
-      'X-Title': 'Gestionnaire EI - DIAMBRA BROU',
-    },
-    body: JSON.stringify(body),
-  });
+  const MAX_RETRIES = 3;
+  const RETRY_STATUSES = [500, 502, 503, 529];
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${err.substring(0, 300)}`);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.APP_URL || 'https://gestionnaire-ei.coolify.inkora.art',
+        'X-Title': 'Gestionnaire EI - DIAMBRA BROU',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.choices[0].message.content;
+    }
+
+    const errText = await res.text();
+
+    // Don't retry client errors (400/401/403/404)
+    if (!RETRY_STATUSES.includes(res.status)) {
+      throw new Error(`OpenRouter ${res.status}: ${errText.substring(0, 300)}`);
+    }
+
+    console.warn(`[AI] OpenRouter ${res.status} on attempt ${attempt}/${MAX_RETRIES} (model: ${model}): ${errText.substring(0, 100)}`);
+
+    if (attempt < MAX_RETRIES) {
+      const delay = attempt * 2000; // 2s, 4s
+      await new Promise(r => setTimeout(r, delay));
+    } else {
+      throw new Error(`OpenRouter ${res.status} after ${MAX_RETRIES} retries: ${errText.substring(0, 300)}`);
+    }
   }
-
-  const data = await res.json();
-  return data.choices[0].message.content;
 }
 
 /**
