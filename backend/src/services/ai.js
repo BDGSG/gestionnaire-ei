@@ -1,14 +1,15 @@
 /**
  * AI Service - Uses OpenRouter API (OpenAI-compatible)
- * Supports Claude, GPT-4, Gemini, etc. via unified endpoint
+ * 2-step pipeline: Pixtral OCR → Claude classification
  */
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const CONFIDENCE_THRESHOLD = 0.7;
 
 // Models
-const FAST_MODEL = 'anthropic/claude-haiku-4-5';   // Fast + cheap for classification
-const SMART_MODEL = 'anthropic/claude-sonnet-4-5';  // Smart for regulatory analysis
+const OCR_MODEL = 'mistralai/pixtral-large-latest';    // Best OCR for documents/tickets
+const CLASSIFY_MODEL = 'anthropic/claude-haiku-4-5';    // Fast classification on extracted text
+const SMART_MODEL = 'anthropic/claude-sonnet-4-5';      // Smart for regulatory analysis
 
 function getApiKey() {
   return process.env.OPENROUTER_API_KEY || process.env.ANTHROPIC_API_KEY;
@@ -42,7 +43,7 @@ async function callOpenRouter(model, messages, { maxTokens = 600, system } = {})
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${err.substring(0, 200)}`);
+    throw new Error(`OpenRouter ${res.status}: ${err.substring(0, 300)}`);
   }
 
   const data = await res.json();
@@ -50,97 +51,155 @@ async function callOpenRouter(model, messages, { maxTokens = 600, system } = {})
 }
 
 /**
- * Classify a document via AI vision
+ * Step 1: OCR via Pixtral - extract ALL text from document
  */
-async function classifyDocument(base64Content, mimeType, filename) {
-  const systemPrompt = `Tu es un assistant specialise dans la classification de documents comptables et administratifs pour une Entreprise Individuelle francaise (VTC, e-commerce, services numeriques).
-
-Analyse le document et retourne UNIQUEMENT un JSON valide (sans markdown, sans backticks) avec ces champs:
-{
-  "category": "facture_emise|facture_recue|devis|releve_bancaire|fiscal|social_urssaf|assurance|contrat|administratif|vehicule|ecommerce|autre",
-  "title": "Titre court descriptif du document",
-  "date": "YYYY-MM-DD ou null si non trouvee",
-  "amount": nombre ou null,
-  "vendor": "Nom de l'emetteur/fournisseur ou null",
-  "reference": "Numero de reference/facture ou null",
-  "description": "Description en 1 phrase du contenu du document",
-  "confidence": 0.0 a 1.0,
-  "doubt_reason": "Si confidence < 0.7, explique brievement pourquoi tu doutes. Sinon null",
-  "suggested_categories": ["categorie1", "categorie2"]
-}
-
-Regles de classification:
-- Factures Uber/Bolt → "facture_recue"
-- Factures que l'EI emet a ses clients → "facture_emise"
-- Releves de compte bancaire → "releve_bancaire"
-- Avis d'imposition, declarations TVA, CFE → "fiscal"
-- Attestations URSSAF, cotisations sociales → "social_urssaf"
-- RC Pro, assurance auto, mutuelle → "assurance"
-- Carte grise, controle technique, PV → "vehicule"
-- Commandes clients e-commerce → "ecommerce"
-- Kbis, SIRET, attestations INSEE → "administratif"
-- Contrats clients, baux, CGV → "contrat"
-- Devis emis ou recus → "devis"
-
-Sois honnete sur ta confiance. Si le document est flou ou ambigu, mets une confiance basse.`;
+async function ocrDocument(base64Content, mimeType, filename) {
+  console.log(`[AI] OCR starting with ${OCR_MODEL} for ${filename}`);
 
   const messages = [{ role: 'user', content: [] }];
 
-  if (mimeType.startsWith('image/')) {
+  if (mimeType.startsWith('image/') || mimeType === 'application/pdf') {
     messages[0].content.push({
       type: 'image_url',
       image_url: { url: `data:${mimeType};base64,${base64Content}` }
-    });
-  } else if (mimeType === 'application/pdf') {
-    // OpenRouter/Claude supports PDF via base64 in some models
-    messages[0].content.push({
-      type: 'image_url',
-      image_url: { url: `data:application/pdf;base64,${base64Content}` }
-    });
-  } else {
-    messages[0].content.push({
-      type: 'text',
-      text: `Document: ${filename}\n\nContenu extrait:\n${base64Content}`
     });
   }
 
   messages[0].content.push({
     type: 'text',
-    text: 'Analyse ce document et retourne le JSON de classification.'
+    text: `Extrais TOUT le texte visible de ce document, caractere par caractere. Inclus:
+- Tous les montants, dates, numeros de reference
+- Noms, adresses, numeros de telephone/SIRET/TVA
+- Libelles de chaque ligne, quantites, prix unitaires, totaux
+- En-tetes, pieds de page, mentions legales
+- Numeros de ticket, de facture, de commande
+
+Retourne le texte brut extrait, ligne par ligne, tel quel. Ne resume pas, ne reformule pas. Copie exactement ce qui est ecrit.`
   });
 
   try {
-    const text = await callOpenRouter(FAST_MODEL, messages, { maxTokens: 600, system: systemPrompt });
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const result = JSON.parse(jsonMatch[0]);
-      result.needs_review = (result.confidence || 0) < CONFIDENCE_THRESHOLD;
-      return result;
-    }
-    return { category: 'autre', title: filename, confidence: 0, needs_review: true, doubt_reason: 'Impossible d\'analyser' };
-  } catch (err) {
-    console.error('[AI] Classification error:', err.message);
-    return { category: 'autre', title: filename, confidence: 0, needs_review: true, error: err.message, doubt_reason: err.message };
-  }
-}
-
-/**
- * OCR: extract text from image
- */
-async function ocrImage(base64Content, mimeType) {
-  try {
-    const messages = [{
-      role: 'user',
-      content: [
-        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Content}` } },
-        { type: 'text', text: 'Extrais tout le texte visible de cette image. Retourne uniquement le texte brut.' }
-      ]
-    }];
-    return await callOpenRouter(FAST_MODEL, messages, { maxTokens: 2000 });
+    const text = await callOpenRouter(OCR_MODEL, messages, { maxTokens: 3000 });
+    console.log(`[AI] OCR extracted ${text.length} chars`);
+    return text;
   } catch (err) {
     console.error('[AI] OCR error:', err.message);
     return '';
   }
 }
 
-module.exports = { classifyDocument, ocrImage, callOpenRouter, CONFIDENCE_THRESHOLD, FAST_MODEL, SMART_MODEL };
+/**
+ * Step 2: Classify based on OCR text via Claude
+ */
+async function classifyFromText(ocrText, filename) {
+  console.log(`[AI] Classifying from ${ocrText.length} chars of OCR text`);
+
+  const systemPrompt = `Tu es un assistant specialise dans la classification de documents comptables pour une EI francaise (VTC, e-commerce, services numeriques).
+
+Tu recois le texte OCR brut extrait d'un document. Analyse-le attentivement et retourne UNIQUEMENT un JSON valide (sans markdown, sans backticks):
+{
+  "category": "facture_emise|facture_recue|devis|releve_bancaire|fiscal|social_urssaf|assurance|contrat|administratif|vehicule|ecommerce|autre",
+  "title": "Titre court et precis du document",
+  "date": "YYYY-MM-DD ou null",
+  "amount": nombre (montant TTC principal) ou null,
+  "vendor": "Nom exact de l'emetteur/fournisseur tel qu'ecrit sur le document",
+  "reference": "Numero de reference/facture/ticket exact ou null",
+  "description": "Description precise en 1 phrase",
+  "confidence": 0.0 a 1.0,
+  "doubt_reason": "Raison du doute si confidence < 0.7, sinon null",
+  "suggested_categories": ["categorie1", "categorie2"],
+  "expense_type": "carburant|entretien_vehicule|assurance|telephone|internet|logiciel|achat_marchandise|frais_port|comptabilite|formation|cotisations_sociales|impots_taxes|fournitures|deplacement|peage|parking|autre|null"
+}
+
+Regles de classification:
+- Tickets de caisse/station-service/carburant → "facture_recue", expense_type: "carburant"
+- Factures Uber/Bolt (commissions, relevés) → "facture_recue"
+- Peages autoroute → "facture_recue", expense_type: "peage"
+- Parking → "facture_recue", expense_type: "parking"
+- Factures que l'EI emet a ses clients → "facture_emise"
+- Releves de compte bancaire → "releve_bancaire"
+- Avis d'imposition, declarations TVA, CFE → "fiscal"
+- Attestations URSSAF, cotisations sociales → "social_urssaf"
+- RC Pro, assurance auto, mutuelle → "assurance"
+- Carte grise, controle technique, PV, amendes → "vehicule"
+- Commandes clients e-commerce → "ecommerce"
+- Kbis, SIRET, attestations INSEE → "administratif"
+- Contrats, baux, CGV → "contrat"
+- Devis emis ou recus → "devis"
+
+IMPORTANT:
+- Lis attentivement le texte OCR pour identifier le TYPE REEL du document
+- Un ticket de station-service n'est PAS un ticket de course VTC
+- Le montant doit etre le TOTAL TTC final (pas un sous-total)
+- Le vendor doit etre le NOM REEL du commerce/entreprise
+- Sois honnete sur ta confiance`;
+
+  try {
+    const text = await callOpenRouter(CLASSIFY_MODEL, [
+      { role: 'user', content: `Voici le texte OCR extrait du document "${filename}":\n\n---\n${ocrText}\n---\n\nClassifie ce document.` }
+    ], { maxTokens: 800, system: systemPrompt });
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      result.needs_review = (result.confidence || 0) < CONFIDENCE_THRESHOLD;
+      result.ocr_text = ocrText;
+      return result;
+    }
+    return { category: 'autre', title: filename, confidence: 0, needs_review: true, doubt_reason: 'Impossible d\'analyser', ocr_text: ocrText };
+  } catch (err) {
+    console.error('[AI] Classification error:', err.message);
+    return { category: 'autre', title: filename, confidence: 0, needs_review: true, error: err.message, doubt_reason: err.message, ocr_text: ocrText };
+  }
+}
+
+/**
+ * Main: OCR + Classify pipeline
+ */
+async function classifyDocument(base64Content, mimeType, filename) {
+  // Step 1: OCR with Pixtral
+  let ocrText = '';
+  if (mimeType.startsWith('image/') || mimeType === 'application/pdf') {
+    ocrText = await ocrDocument(base64Content, mimeType, filename);
+  } else {
+    ocrText = base64Content; // Already text
+  }
+
+  if (!ocrText || ocrText.length < 10) {
+    console.warn('[AI] OCR returned empty/short text, falling back to vision classification');
+    // Fallback: send image directly to Claude for classification
+    return classifyWithVision(base64Content, mimeType, filename);
+  }
+
+  // Step 2: Classify from text
+  return classifyFromText(ocrText, filename);
+}
+
+/**
+ * Fallback: direct vision classification (if OCR fails)
+ */
+async function classifyWithVision(base64Content, mimeType, filename) {
+  const messages = [{ role: 'user', content: [] }];
+  messages[0].content.push({
+    type: 'image_url',
+    image_url: { url: `data:${mimeType};base64,${base64Content}` }
+  });
+  messages[0].content.push({
+    type: 'text',
+    text: 'Analyse ce document et retourne le JSON de classification.'
+  });
+
+  try {
+    const text = await callOpenRouter(OCR_MODEL, messages, { maxTokens: 800, system: 'Retourne un JSON de classification du document avec: category, title, date, amount, vendor, reference, description, confidence, doubt_reason, suggested_categories. Categories: facture_emise, facture_recue, devis, releve_bancaire, fiscal, social_urssaf, assurance, contrat, administratif, vehicule, ecommerce, autre.' });
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      result.needs_review = (result.confidence || 0) < CONFIDENCE_THRESHOLD;
+      return result;
+    }
+  } catch (err) {
+    console.error('[AI] Vision fallback error:', err.message);
+  }
+  return { category: 'autre', title: filename, confidence: 0, needs_review: true, doubt_reason: 'OCR et vision ont echoue' };
+}
+
+module.exports = { classifyDocument, ocrDocument, classifyFromText, callOpenRouter, CONFIDENCE_THRESHOLD, OCR_MODEL, CLASSIFY_MODEL, SMART_MODEL };

@@ -581,16 +581,25 @@ function initBot() {
       // Escape markdown special chars in AI-generated strings
       const esc = (s) => s ? String(s).replace(/([*_`\[\]])/g, '\\$1') : '';
 
+      const expenseLabels = {
+        carburant: '⛽ Carburant', entretien_vehicule: '🔧 Entretien véhicule', assurance: '🛡️ Assurance',
+        telephone: '📱 Téléphone', internet: '🌐 Internet', logiciel: '💻 Logiciel',
+        achat_marchandise: '📦 Achat marchandise', frais_port: '📬 Frais port', comptabilite: '🧮 Comptabilité',
+        formation: '🎓 Formation', cotisations_sociales: '🏥 Cotisations', impots_taxes: '🏛️ Impôts/Taxes',
+        fournitures: '🖊️ Fournitures', deplacement: '🚗 Déplacement', peage: '🛣️ Péage', parking: '🅿️ Parking'
+      };
+
       // Si confiance haute → confirmation simple
       if (!classification.needs_review) {
         await safeSend(chatId,
           `✅ *Document classifié et archivé*\n\n` +
           `📂 ${categoryLabels[classification.category] || classification.category}\n` +
           `📝 ${esc(classification.title)}\n` +
-          `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
-          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
-          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) : ''}\n` +
-          `${classification.reference ? '🔢 Réf: ' + esc(classification.reference) : ''}\n` +
+          `${classification.expense_type ? '🏷️ Type: ' + (expenseLabels[classification.expense_type] || classification.expense_type) + '\n' : ''}` +
+          `${classification.date ? '📅 Date: ' + classification.date + '\n' : ''}` +
+          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €\n' : ''}` +
+          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) + '\n' : ''}` +
+          `${classification.reference ? '🔢 Réf: ' + esc(classification.reference) + '\n' : ''}` +
           `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%`
         );
       } else {
