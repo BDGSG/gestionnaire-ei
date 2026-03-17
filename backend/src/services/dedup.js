@@ -12,6 +12,15 @@
 const crypto = require('crypto');
 const { supabase } = require('./supabase');
 
+// Sharp is optional — if it fails to load, pHash is disabled
+let sharp = null;
+try {
+  sharp = require('sharp');
+  console.log('[Dedup] sharp loaded — perceptual hash enabled');
+} catch (err) {
+  console.warn('[Dedup] sharp not available — perceptual hash disabled:', err.message);
+}
+
 // ============================================================
 // Layer 3: Perceptual Hash (dHash) via sharp
 // Résiste à la compression, resize, léger recadrage
@@ -20,7 +29,7 @@ async function computePerceptualHash(buffer, mimeType) {
   if (!mimeType.startsWith('image/')) return null;
 
   try {
-    const sharp = require('sharp');
+    if (!sharp) return null;
     // Resize to 9x8 grayscale, compare adjacent pixels
     const { data } = await sharp(buffer)
       .greyscale()

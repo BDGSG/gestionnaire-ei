@@ -11,10 +11,7 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app
 
-# Sharp needs vips on Alpine
-RUN apk add --no-cache vips-dev
-
-# Install backend dependencies
+# Install backend dependencies (sharp uses prebuilt binaries for Alpine)
 COPY backend/package.json backend/package-lock.json ./
 RUN npm ci --omit=dev
 
