@@ -118,16 +118,20 @@ Retourne UNIQUEMENT un JSON valide (PAS de markdown, PAS de backticks, PAS de te
   "reference": "Numero de facture/ticket/reference exact, ou null",
   "description": "Description en 1 phrase",
   "expense_type": "carburant|entretien_vehicule|assurance|telephone|internet|logiciel|achat_marchandise|frais_port|comptabilite|formation|cotisations_sociales|impots_taxes|fournitures|deplacement|peage|parking|autre|null",
+  "payment_method": "especes|cb|virement|cheque|prelevement|plateforme|autre|inconnu",
+  "is_cash_advance": true/false,
   "confidence": 0.0 a 1.0,
   "field_confidence": {
     "date": 0.0-1.0,
     "amount_ttc": 0.0-1.0,
     "vendor": 0.0-1.0,
     "reference": 0.0-1.0,
-    "category": 0.0-1.0
+    "category": 0.0-1.0,
+    "payment_method": 0.0-1.0
   },
   "doubt_reason": "raison si confidence < 0.7, sinon null",
-  "suggested_categories": []
+  "suggested_categories": [],
+  "questions": ["question 1 si doute", "question 2 si doute"]
 }
 
 REGLES ABSOLUES:
@@ -136,6 +140,22 @@ REGLES ABSOLUES:
 - Le montant doit etre le TOTAL TTC final tel qu'ecrit.
 - Le vendor est le NOM EXACT du commerce/entreprise emetteur, tel qu'imprime.
 - field_confidence: ta confiance pour chaque champ individuel (0.0 = pas vu, 1.0 = certain)
+
+DETECTION DU MODE DE PAIEMENT:
+- Cherche les mentions: "ESPECES", "CB", "CARTE", "VISA", "MASTERCARD", "VIREMENT", "CHEQUE", "PRELEVEMENT", "TPE"
+- Si "ESPECES" ou "CASH" visible sur le ticket -> payment_method: "especes"
+- Si "CB", "CARTE BANCAIRE", "VISA", "MC", numero carte masque (****) -> payment_method: "cb"
+- Si aucune mention de paiement visible -> payment_method: "inconnu"
+
+AVANCE DE FRAIS (is_cash_advance):
+- Un ticket paye en ESPECES pour une depense professionnelle (carburant, peage, parking, fournitures...) est tres probablement une avance de frais personnels -> is_cash_advance: true
+- Un ticket paye par CB avec un numero de carte -> probablement pas avance (carte pro ou perso) -> is_cash_advance: false sauf si doute
+- Si le mode de paiement est "inconnu" et que c'est une petite depense pro (< 100 EUR), mettre is_cash_advance en doute (ajouter la question dans "questions")
+
+QUESTIONS (champ "questions"):
+- Si tu as le moindre doute sur un champ, formule une question claire en francais pour demander confirmation
+- Exemples: "Ce ticket de 45.30 EUR a ete paye en especes. Est-ce une avance de frais personnels ?", "Le mode de paiement n'est pas visible. Paye par CB pro, CB perso ou especes ?", "Cette depense de 12 EUR chez Bricorama est-elle professionnelle ?"
+- Si aucun doute, "questions": []
 
 Classification:
 - Tickets station-service/carburant -> "facture_recue", expense: "carburant"

@@ -687,7 +687,10 @@ async function initBot() {
         ocr_text: classification.ocr_text || null,
         file_hash: fileHash,
         perceptual_hash: postCheck.pHash || null,
-        ocr_hash: finalCheck.ocrHash || null
+        ocr_hash: finalCheck.ocrHash || null,
+        detected_payment_method: classification.payment_method || 'inconnu',
+        is_cash_advance: classification.is_cash_advance || false,
+        reimbursement_status: classification.is_cash_advance ? 'pending' : 'none'
       };
       console.log('[Telegram] Inserting document:', JSON.stringify({ category: insertData.category, title: insertData.title, date: insertData.extracted_date }));
 
@@ -733,11 +736,44 @@ async function initBot() {
         amountDisplay = fieldLine('💰', 'Montant', classification.amount + ' EUR', 'amount_ttc');
       }
 
+      // Payment method labels
+      const paymentLabels = {
+        especes: '💵 Especes', cb: '💳 Carte bancaire', virement: '🏦 Virement',
+        cheque: '📝 Cheque', prelevement: '🔄 Prelevement', plateforme: '📱 Plateforme',
+        autre: '❓ Autre', inconnu: '❓ Non detecte'
+      };
+
+      // Auto-create transaction for received invoices (charges)
+      if (classification.category === 'facture_recue' && classification.amount_ttc) {
+        try {
+          const txData = {
+            type: 'depense',
+            activity: classification.expense_type === 'carburant' || classification.expense_type === 'peage' || classification.expense_type === 'parking' || classification.expense_type === 'entretien_vehicule' ? 'vtc' : 'general',
+            date: classification.date || dayjs().format('YYYY-MM-DD'),
+            description: classification.title || classification.description || 'Depense',
+            amount_ht: classification.amount_ht || classification.amount_ttc,
+            amount_tva: classification.amount_tva || 0,
+            amount_ttc: classification.amount_ttc,
+            tva_rate: classification.amount_ht && classification.amount_tva ? Math.round((classification.amount_tva / classification.amount_ht) * 100 * 100) / 100 : null,
+            payment_method: classification.payment_method === 'cb' ? 'carte' : classification.payment_method || 'autre',
+            expense_category: classification.expense_type || 'autre',
+            document_id: doc.id,
+            notes: classification.is_cash_advance ? 'Avance de frais - remboursement en attente' : null
+          };
+          const { data: tx, error: txErr } = await supabase.from('ei_transactions').insert(txData).select('id').single();
+          if (!txErr && tx) {
+            await supabase.from('ei_documents').update({ linked_transaction_id: tx.id }).eq('id', doc.id);
+            console.log(`[Telegram] Auto-created transaction ${tx.id} for doc ${doc.id}`);
+          }
+        } catch (txErr) {
+          console.error('[Telegram] Auto-transaction error:', txErr.message);
+        }
+      }
+
       // Build keyboard for review/correction
       const keyboard = [];
 
       if (classification.needs_review || classification.amount_mismatch) {
-        // Category correction buttons
         const suggestions = classification.suggested_categories || [];
         const allCats = [...new Set([classification.category, ...suggestions])].filter(Boolean);
         const commonCats = ['facture_recue', 'facture_emise', 'fiscal', 'administratif', 'autre'];
@@ -754,14 +790,22 @@ async function initBot() {
         }
       }
 
+      // Cash advance button
+      if (classification.is_cash_advance) {
+        keyboard.push([{ text: '💵 Avance de frais - marquer remboursé', callback_data: `doc_reimb_${doc.id}` }]);
+      } else if (classification.category === 'facture_recue' && classification.payment_method !== 'cb' && classification.payment_method !== 'virement' && classification.payment_method !== 'prelevement') {
+        keyboard.push([{ text: '💵 C\'est une avance de frais', callback_data: `doc_setadv_${doc.id}` }]);
+      }
+
       keyboard.push([{ text: '✅ Correct', callback_data: `doc_confirm_${doc.id}` }]);
 
       const confPercent = Math.round((classification.confidence || 0) * 100);
-      const header = classification.needs_review
-        ? `⚠️ *Document classifié — vérification requise*`
-        : `✅ *Document classifié et archivé*`;
+      const hasQuestions = classification.questions && classification.questions.length > 0;
+      const header = (classification.needs_review || hasQuestions)
+        ? `⚠️ *Document classifie — verification requise*`
+        : `✅ *Document classifie et archive*`;
 
-      const msgText =
+      let msgText =
         `${header}\n\n` +
         `📂 ${categoryLabels[classification.category] || classification.category}\n` +
         `📝 ${esc(classification.title)}\n` +
@@ -771,9 +815,25 @@ async function initBot() {
         fieldLine('🏢', 'Emetteur', classification.vendor, 'vendor') +
         fieldLine('🔢', 'Ref', classification.reference, 'reference') +
         `${classification.vendor_siret ? '🏛️ SIRET: ' + esc(classification.vendor_siret) + '\n' : ''}` +
+        `${classification.payment_method ? (paymentLabels[classification.payment_method] || classification.payment_method) + '\n' : ''}` +
+        `${classification.is_cash_advance ? '💵 *AVANCE DE FRAIS* — remboursement en attente\n' : ''}` +
         `📊 Confiance: ${confPercent}%` +
         `${classification.doubt_reason ? '\n❓ ' + esc(classification.doubt_reason) : ''}` +
-        `${classification.amount_mismatch ? '\n\n⚠️ *Vérifie les montants avant de confirmer*' : ''}`;
+        `${classification.amount_mismatch ? '\n\n⚠️ *Verifie les montants avant de confirmer*' : ''}`;
+
+      // Add AI questions if any
+      if (hasQuestions) {
+        msgText += '\n\n❓ *Questions:*';
+        for (const q of classification.questions) {
+          msgText += `\n• ${esc(q)}`;
+        }
+        msgText += '\n\n_Reponds a ces questions par message ou clique sur un bouton._';
+      }
+
+      // Comptabilité: log the charge
+      if (classification.category === 'facture_recue' && classification.amount_ttc) {
+        msgText += `\n\n📒 _Charge enregistree: ${classification.amount_ttc} EUR_`;
+      }
 
       await safeSend(chatId, msgText, { reply_markup: { inline_keyboard: keyboard } });
 
@@ -820,10 +880,59 @@ async function initBot() {
         .eq('id', docId);
 
       bot.answerCallbackQuery(query.id, { text: 'Classification confirmée !' });
-      bot.editMessageText(
-        query.message.text.replace('⚠️ *Document classifié avec doute*', '✅ *Document confirmé et archivé*').replace('👇 *Choisis la bonne catégorie:*', '_Classification confirmée_'),
+      const confirmText = (query.message.text || '')
+        .replace(/⚠️ \*Document classifie? — ve?rification requise\*/, '✅ *Document confirme et archive*')
+        .replace(/⚠️ \*Document classifié avec doute\*/, '✅ *Document confirme et archive*')
+        .replace(/👇 \*Choisis la bonne catégorie:\*/, '_Classification confirmee_');
+      bot.editMessageText(confirmText,
         { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
-      );
+      ).catch(() => {});
+      return;
+    }
+
+    // Marquer comme avance de frais
+    if (data.startsWith('doc_setadv_')) {
+      const docId = data.replace('doc_setadv_', '');
+      await supabase.from('ei_documents')
+        .update({ is_cash_advance: true, reimbursement_status: 'pending' })
+        .eq('id', docId);
+
+      // Update linked transaction if exists
+      const { data: docData } = await supabase.from('ei_documents').select('linked_transaction_id').eq('id', docId).single();
+      if (docData && docData.linked_transaction_id) {
+        await supabase.from('ei_transactions')
+          .update({ notes: 'Avance de frais - remboursement en attente' })
+          .eq('id', docData.linked_transaction_id);
+      }
+
+      bot.answerCallbackQuery(query.id, { text: 'Marqué comme avance de frais !' });
+      const advText = (query.message.text || '') + '\n\n💵 *Marque comme avance de frais — remboursement en attente*';
+      bot.editMessageText(advText,
+        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+      ).catch(() => {});
+      return;
+    }
+
+    // Marquer remboursement effectué
+    if (data.startsWith('doc_reimb_')) {
+      const docId = data.replace('doc_reimb_', '');
+      await supabase.from('ei_documents')
+        .update({ reimbursement_status: 'reimbursed' })
+        .eq('id', docId);
+
+      // Update linked transaction
+      const { data: docData } = await supabase.from('ei_documents').select('linked_transaction_id, extracted_amount, title').eq('id', docId).single();
+      if (docData && docData.linked_transaction_id) {
+        await supabase.from('ei_transactions')
+          .update({ notes: 'Avance de frais - REMBOURSE' })
+          .eq('id', docData.linked_transaction_id);
+      }
+
+      bot.answerCallbackQuery(query.id, { text: 'Remboursement enregistré !' });
+      const reimbText = (query.message.text || '').replace('remboursement en attente', 'REMBOURSE ✅');
+      bot.editMessageText(reimbText,
+        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+      ).catch(() => {});
       return;
     }
 
