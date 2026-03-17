@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { supabase } = require('./supabase');
 const { classifyDocument, chatWithAI, CONFIDENCE_THRESHOLD } = require('./ai');
+const { checkDuplicate } = require('./dedup');
 const { generateInvoicePdf } = require('./pdf');
 const dayjs = require('dayjs');
 
@@ -578,7 +579,7 @@ async function initBot() {
       if (type === 'photo') {
         const photo = msg.photo[msg.photo.length - 1];
         fileId = photo.file_id;
-        fileUniqueId = photo.file_unique_id; // Stable across re-sends
+        fileUniqueId = photo.file_unique_id;
         fileName = `photo_${Date.now()}.jpg`;
         mimeType = 'image/jpeg';
       } else {
@@ -588,104 +589,62 @@ async function initBot() {
         mimeType = msg.document.mime_type || 'application/octet-stream';
       }
 
-      // --- Anti-doublon Layer 0: Telegram file_unique_id (le plus fiable) ---
-      // file_unique_id est stable même si la photo est recompressée par Telegram
-      if (fileUniqueId) {
-        const { data: uidDups } = await supabase
-          .from('ei_documents')
-          .select('id, title, category, extracted_date, created_at')
-          .eq('telegram_file_unique_id', fileUniqueId)
-          .limit(1);
-
-        if (uidDups && uidDups.length > 0) {
-          const dup = uidDups[0];
-          const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
-          await safeSend(chatId,
-            `⚠️ *Doublon détecté !*\n\n` +
-            `Ce document existe déjà :\n` +
-            `📝 ${dup.title}\n` +
-            `📂 ${categoryLabels[dup.category] || dup.category}\n` +
-            `📅 ${dupDate}\n\n` +
-            `Le document n'a pas été ajouté une 2ème fois.`
-          );
-          return;
-        }
-      }
-
-      // Télécharger le fichier
-      console.log(`[Telegram] Downloading file: ${fileName} (${mimeType}), uniqueId: ${fileUniqueId}`);
-      const fileLink = await bot.getFileLink(fileId);
-      const response = await fetch(fileLink);
-      const buffer = Buffer.from(await response.arrayBuffer());
-      const base64 = buffer.toString('base64');
-      console.log(`[Telegram] Downloaded ${buffer.length} bytes`);
-
-      // --- Anti-doublon Layer 1: hash SHA-256 exact ---
+      // --- Anti-doublon pré-download (couches 1-2) ---
       const crypto = require('crypto');
-      const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
-
-      const { data: hashDups } = await supabase
-        .from('ei_documents')
-        .select('id, title, category, extracted_date, created_at')
-        .eq('file_hash', fileHash)
-        .limit(1);
-
-      if (hashDups && hashDups.length > 0) {
-        const dup = hashDups[0];
-        const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
+      const preCheck = await checkDuplicate({ fileUniqueId });
+      if (preCheck.isDuplicate) {
         await safeSend(chatId,
-          `⚠️ *Doublon détecté !*\n\n` +
-          `Ce document existe déjà (hash identique) :\n` +
-          `📝 ${dup.title}\n` +
-          `📂 ${categoryLabels[dup.category] || dup.category}\n` +
-          `📅 ${dupDate}\n\n` +
-          `Le document n'a pas été ajouté une 2ème fois.`
+          `⚠️ *Doublon detecte !*\n\n${preCheck.message}\n\nDocument non ajoute.`
         );
         return;
       }
 
-      console.log(`[Telegram] No duplicate found (hash: ${fileHash.substring(0, 12)}..., uid: ${fileUniqueId}), classifying...`);
+      // Télécharger le fichier
+      console.log(`[Telegram] Downloading: ${fileName} (${mimeType}), uid: ${fileUniqueId}`);
+      const fileLink = await bot.getFileLink(fileId);
+      const response = await fetch(fileLink);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const base64 = buffer.toString('base64');
+      const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+      console.log(`[Telegram] Downloaded ${buffer.length} bytes, hash: ${fileHash.substring(0, 12)}...`);
 
-      // Classifier via IA (supporte images ET PDF natifs)
+      // --- Anti-doublon post-download (couches 2-3: hash + pHash) ---
+      const postCheck = await checkDuplicate({ fileHash, buffer, mimeType });
+      if (postCheck.isDuplicate) {
+        await safeSend(chatId,
+          `⚠️ *Doublon detecte !*\n\n${postCheck.message}\n\nDocument non ajoute.`
+        );
+        return;
+      }
+
+      // Classifier via IA (2 passes: Pixtral OCR → Sonnet classification)
       let classification;
       if (mimeType.startsWith('image/') || mimeType === 'application/pdf') {
         classification = await classifyDocument(base64, mimeType, fileName);
       } else {
         classification = await classifyDocument(
           `Fichier: ${fileName}, Type: ${mimeType}, Taille: ${buffer.length} bytes`,
-          'text/plain',
-          fileName
+          'text/plain', fileName
         );
       }
-      console.log(`[Telegram] Classification result:`, JSON.stringify({ category: classification.category, confidence: classification.confidence, error: classification.error }));
+      console.log(`[Telegram] Classification:`, JSON.stringify({
+        category: classification.category, confidence: classification.confidence,
+        vendor: classification.vendor, date: classification.date, ref: classification.reference
+      }));
 
-      // Check 3: post-classification - même date + même montant + même émetteur = doublon sémantique
-      if (classification.date && classification.amount && classification.vendor) {
-        let metaQuery = supabase
-          .from('ei_documents')
-          .select('id, title, category, extracted_date, created_at')
-          .eq('extracted_date', classification.date)
-          .eq('extracted_amount', classification.amount);
-
-        // vendor matching flexible (ilike)
-        metaQuery = metaQuery.ilike('extracted_vendor', `%${classification.vendor.substring(0, 15)}%`);
-
-        const { data: metaDups } = await metaQuery.limit(1);
-
-        if (metaDups && metaDups.length > 0) {
-          const dup = metaDups[0];
-          await safeSend(chatId,
-            `⚠️ *Doublon probable détecté !*\n\n` +
-            `Un document similaire existe déjà :\n` +
-            `📝 ${dup.title}\n` +
-            `📂 ${categoryLabels[dup.category] || dup.category}\n` +
-            `📅 ${dup.extracted_date}\n` +
-            `💰 ${classification.amount} EUR\n\n` +
-            `Le document n'a pas été ajouté. Si c'est un document différent, renvoie-le et tape /forcer.`
-          );
-          return;
-        }
+      // --- Anti-doublon post-classification (couches 4-5-6: OCR hash + ref + semantic) ---
+      const finalCheck = await checkDuplicate({
+        ocrText: classification.ocr_text,
+        classification
+      });
+      if (finalCheck.isDuplicate) {
+        await safeSend(chatId,
+          `⚠️ *Doublon detecte !*\n\n${finalCheck.message}\n\nDocument non ajoute.`
+        );
+        return;
       }
+
+      console.log('[Telegram] No duplicate found, saving...');
 
       // Sauvegarder dans Supabase Storage
       const year = classification.date ? new Date(classification.date).getFullYear() : new Date().getFullYear();
@@ -726,7 +685,9 @@ async function initBot() {
         telegram_file_unique_id: fileUniqueId || null,
         ai_classification_confidence: classification.confidence || 0,
         ocr_text: classification.ocr_text || null,
-        file_hash: fileHash
+        file_hash: fileHash,
+        perceptual_hash: postCheck.pHash || null,
+        ocr_hash: finalCheck.ocrHash || null
       };
       console.log('[Telegram] Inserting document:', JSON.stringify({ category: insertData.category, title: insertData.title, date: insertData.extracted_date }));
 

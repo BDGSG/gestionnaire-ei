@@ -18,7 +18,8 @@
     "multer": "^1.4.5-lts.1",
     "node-telegram-bot-api": "^0.66.0",
     "pdf-lib": "^1.17.1",
-    "pdfmake": "^0.2.15"
+    "pdfmake": "^0.2.15",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.9"
