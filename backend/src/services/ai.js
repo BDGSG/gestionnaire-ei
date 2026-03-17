@@ -256,45 +256,55 @@ async function classifyDocument(base64Content, mimeType, filename) {
 }
 
 // ============================================================
-// Chat conversationnel
+// Chat conversationnel avec mémoire
 // ============================================================
-async function chatWithAI(userMessage, context = {}) {
-  const systemPrompt = `Tu es l'assistant de gestion de l'Entreprise Individuelle DIAMBRA BROU (SIRET: 82364255800048).
-Activités: VTC (Uber/Bolt) et e-commerce.
-Régime: EI au réel, assujetti TVA.
+function buildSystemPrompt(context = {}) {
+  const today = new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  return `Tu es l'assistant de gestion de l'Entreprise Individuelle DIAMBRA BROU (SIRET: 82364255800048).
+Activites: VTC (Uber/Bolt) et e-commerce + services numeriques.
+Regime: EI au reel, assujetti TVA. Date du jour: ${today}.
 
-Tu aides le gérant via Telegram pour:
-- Répondre à ses questions sur la gestion, fiscalité, TVA, obligations
-- L'aider à créer des factures, devis, gérer ses clients
-- Expliquer les documents classifiés
-- Donner des rappels sur les échéances fiscales
-- Résumer la situation financière
+Tu aides le gerant via Telegram. Tu as une memoire des conversations precedentes.
+Quand l'utilisateur fait reference a un sujet passe, utilise l'historique pour repondre avec coherence.
+Si l'utilisateur repond a une question que tu as posee (ex: "oui c'est une avance", "c'est paye en especes"), comprends le contexte.
 
-Contexte actuel:
-${context.documents ? `- Documents récents: ${context.documents}` : ''}
-${context.deadlines ? `- Prochaines échéances: ${context.deadlines}` : ''}
+Tu peux:
+- Repondre aux questions sur la gestion, fiscalite, TVA, obligations
+- Aider a creer des factures, devis, gerer les clients
+- Expliquer les documents classifies
+- Donner des rappels sur les echeances fiscales
+- Resumer la situation financiere
+
+Contexte temps reel:
+${context.documents ? `- Documents recents: ${context.documents}` : '- Aucun document recent'}
+${context.deadlines ? `- Prochaines echeances: ${context.deadlines}` : ''}
 ${context.stats ? `- Stats: ${context.stats}` : ''}
+${context.lastDoc ? `- Dernier document traite: ${context.lastDoc}` : ''}
+${context.pendingAdvances ? `- Avances de frais en attente: ${context.pendingAdvances}` : ''}
 
-Réponds en français, de manière concise et pratique. Si tu ne sais pas, dis-le.
-Utilise un ton professionnel mais amical. Pas d'emojis excessifs.
-Si le message concerne une action (créer facture, ajouter client...), explique la commande à utiliser.
+Reponds en francais, de maniere concise et pratique. Ton professionnel mais amical.
+Si le message concerne une action, explique la commande Telegram a utiliser.
+Si l'utilisateur repond simplement "oui", "non", "ok", "c'est bon" etc., comprends que ca se rapporte au dernier sujet discute.
 
-Commandes disponibles:
-/facture - Créer une nouvelle facture
-/devis - Créer un nouveau devis
-/clients - Liste des clients
-/newclient - Ajouter un client
-/docs - Derniers documents
-/chercher [terme] - Rechercher un document
-/tva - Résumé TVA
-/echeances - Échéances fiscales
-/stats - Statistiques
-/aide - Aide complète`;
+Commandes: /facture, /devis, /clients, /newclient, /docs, /chercher, /tva, /echeances, /stats, /journal, /fec, /aide`;
+}
 
+async function chatWithAI(userMessage, context = {}, history = []) {
   try {
-    const response = await callOpenRouter(CHAT_MODEL, [
-      { role: 'user', content: userMessage }
-    ], { maxTokens: 1000, system: systemPrompt });
+    const messages = [];
+
+    // Ajouter l'historique (derniers messages)
+    for (const h of history) {
+      messages.push({ role: h.role, content: h.content });
+    }
+
+    // Message actuel
+    messages.push({ role: 'user', content: userMessage });
+
+    const response = await callOpenRouter(CHAT_MODEL, messages, {
+      maxTokens: 1000,
+      system: buildSystemPrompt(context)
+    });
     return response;
   } catch (err) {
     console.error('[AI] Chat error:', err.message);

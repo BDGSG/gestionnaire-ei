@@ -464,18 +464,37 @@ async function initBot() {
       }
     }
 
-    // Chat conversationnel IA
+    // Chat conversationnel IA avec mémoire
     try {
       console.log(`[Telegram] Chat message: "${msg.text.substring(0, 50)}..."`);
 
-      // Récupérer du contexte pour enrichir la réponse
+      // Sauvegarder le message utilisateur dans l'historique
+      await supabase.from('ei_chat_history').insert({
+        role: 'user', content: msg.text, chat_id: chatId, context_type: 'chat'
+      }).catch(() => {});
+
+      // Charger l'historique récent (20 derniers messages)
+      const { data: historyRows } = await supabase.from('ei_chat_history')
+        .select('role, content')
+        .eq('chat_id', chatId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      // Inverser pour ordre chronologique (sans le dernier = message actuel)
+      const history = (historyRows || []).reverse().slice(0, -1);
+
+      // Récupérer du contexte temps réel
       const context = {};
       try {
         const { data: recentDocs } = await supabase.from('ei_documents')
-          .select('title, category, extracted_date, extracted_amount')
+          .select('title, category, extracted_date, extracted_amount, is_cash_advance, detected_payment_method')
           .order('created_at', { ascending: false }).limit(5);
         if (recentDocs && recentDocs.length > 0) {
-          context.documents = recentDocs.map(d => `${d.title} (${d.category}, ${d.extracted_date || '?'}, ${d.extracted_amount ? d.extracted_amount + '€' : '?'})`).join('; ');
+          context.documents = recentDocs.map(d =>
+            `${d.title} (${d.category}, ${d.extracted_date || '?'}, ${d.extracted_amount ? d.extracted_amount + 'EUR' : '?'}${d.is_cash_advance ? ', AVANCE FRAIS' : ''})`
+          ).join('; ');
+          const last = recentDocs[0];
+          context.lastDoc = `${last.title} — ${last.category}, ${last.extracted_date}, ${last.extracted_amount ? last.extracted_amount + 'EUR' : '?'}, paiement: ${last.detected_payment_method || '?'}${last.is_cash_advance ? ' (avance de frais)' : ''}`;
         }
 
         const { data: deadlines } = await supabase.from('ei_fiscal_deadlines')
@@ -491,22 +510,37 @@ async function initBot() {
         if (invoiceStats && invoiceStats.length > 0) {
           const total = invoiceStats.reduce((s, i) => s + parseFloat(i.total_ttc || 0), 0);
           const paid = invoiceStats.filter(i => i.status === 'paid').reduce((s, i) => s + parseFloat(i.total_ttc || 0), 0);
-          context.stats = `${invoiceStats.length} factures, CA total: ${total.toFixed(2)}€, payé: ${paid.toFixed(2)}€`;
+          context.stats = `${invoiceStats.length} factures, CA total: ${total.toFixed(2)}EUR, paye: ${paid.toFixed(2)}EUR`;
+        }
+
+        // Avances de frais en attente
+        const { data: pendingAdv } = await supabase.from('ei_documents')
+          .select('title, extracted_amount, extracted_date')
+          .eq('is_cash_advance', true)
+          .eq('reimbursement_status', 'pending');
+        if (pendingAdv && pendingAdv.length > 0) {
+          const totalAdv = pendingAdv.reduce((s, d) => s + parseFloat(d.extracted_amount || 0), 0);
+          context.pendingAdvances = `${pendingAdv.length} avances (${totalAdv.toFixed(2)} EUR a rembourser)`;
         }
       } catch (ctxErr) {
         console.error('[Telegram] Context fetch error:', ctxErr.message);
       }
 
-      const response = await chatWithAI(msg.text, context);
+      const response = await chatWithAI(msg.text, context, history);
 
       if (response) {
+        // Sauvegarder la réponse dans l'historique
+        await supabase.from('ei_chat_history').insert({
+          role: 'assistant', content: response, chat_id: chatId, context_type: 'chat'
+        }).catch(() => {});
+
         await safeSend(chatId, response);
       } else {
-        await safeSend(chatId, "Désolé, je n'ai pas pu traiter ta demande. Réessaie ou utilise /aide pour voir les commandes.");
+        await safeSend(chatId, "Desole, je n'ai pas pu traiter ta demande. Reessaie ou utilise /aide.");
       }
     } catch (err) {
       console.error('[Telegram] Chat error:', err.message);
-      bot.sendMessage(chatId, `Je n'ai pas pu répondre. Erreur: ${err.message.substring(0, 100)}`).catch(() => {});
+      bot.sendMessage(chatId, `Je n'ai pas pu repondre. Erreur: ${err.message.substring(0, 100)}`).catch(() => {});
     }
   });
 
@@ -917,6 +951,14 @@ async function initBot() {
       }
 
       await safeSend(chatId, msgText, { reply_markup: { inline_keyboard: keyboard } });
+
+      // Sauvegarder le résultat de classification dans l'historique chat
+      // pour que l'IA ait le contexte si l'utilisateur répond par texte
+      const docSummary = `[Document classifie] ${classification.title || fileName} — ${classification.category}, ${classification.date || '?'}, ${classification.amount_ttc ? classification.amount_ttc + ' EUR' : '?'}, emetteur: ${classification.vendor || '?'}, paiement: ${classification.payment_method || '?'}${classification.is_cash_advance ? ', avance de frais' : ''}${classification.questions && classification.questions.length > 0 ? '. Questions posees: ' + classification.questions.join('; ') : ''}`;
+      await supabase.from('ei_chat_history').insert({
+        role: 'assistant', content: docSummary, chat_id: chatId,
+        context_type: 'doc_question', linked_document_id: doc.id
+      }).catch(() => {});
 
     } catch (err) {
       console.error('[Telegram] Document error:', err);
