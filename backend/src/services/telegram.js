@@ -536,18 +536,43 @@ function initBot() {
       const crypto = require('crypto');
       const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
 
-      const { data: duplicates } = await supabase
+      // Check 1: exact hash match (même fichier binaire)
+      const { data: hashDups } = await supabase
         .from('ei_documents')
         .select('id, title, category, extracted_date, created_at')
         .eq('file_hash', fileHash)
         .limit(1);
 
-      if (duplicates && duplicates.length > 0) {
-        const dup = duplicates[0];
+      if (hashDups && hashDups.length > 0) {
+        const dup = hashDups[0];
         const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
         await safeSend(chatId,
           `⚠️ *Doublon détecté !*\n\n` +
           `Ce document existe déjà :\n` +
+          `📝 ${dup.title}\n` +
+          `📂 ${categoryLabels[dup.category] || dup.category}\n` +
+          `📅 ${dupDate}\n\n` +
+          `Le document n'a pas été ajouté une 2ème fois.`
+        );
+        return;
+      }
+
+      // Check 2: même fichier reçu récemment (Telegram compresse, hash différent)
+      // Si même nom de fichier + taille similaire (+/- 20%) dans les 5 dernières minutes → probablement un doublon
+      const fiveMinAgo = dayjs().subtract(5, 'minute').toISOString();
+      const { data: recentDups } = await supabase
+        .from('ei_documents')
+        .select('id, title, category, extracted_date, file_size, created_at')
+        .eq('original_filename', fileName)
+        .gte('created_at', fiveMinAgo)
+        .limit(1);
+
+      if (recentDups && recentDups.length > 0) {
+        const dup = recentDups[0];
+        const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
+        await safeSend(chatId,
+          `⚠️ *Doublon détecté !*\n\n` +
+          `Ce document a été envoyé il y a moins de 5 minutes :\n` +
           `📝 ${dup.title}\n` +
           `📂 ${categoryLabels[dup.category] || dup.category}\n` +
           `📅 ${dupDate}\n\n` +
@@ -570,6 +595,34 @@ function initBot() {
         );
       }
       console.log(`[Telegram] Classification result:`, JSON.stringify({ category: classification.category, confidence: classification.confidence, error: classification.error }));
+
+      // Check 3: post-classification - même date + même montant + même émetteur = doublon sémantique
+      if (classification.date && classification.amount && classification.vendor) {
+        let metaQuery = supabase
+          .from('ei_documents')
+          .select('id, title, category, extracted_date, created_at')
+          .eq('extracted_date', classification.date)
+          .eq('extracted_amount', classification.amount);
+
+        // vendor matching flexible (ilike)
+        metaQuery = metaQuery.ilike('extracted_vendor', `%${classification.vendor.substring(0, 15)}%`);
+
+        const { data: metaDups } = await metaQuery.limit(1);
+
+        if (metaDups && metaDups.length > 0) {
+          const dup = metaDups[0];
+          await safeSend(chatId,
+            `⚠️ *Doublon probable détecté !*\n\n` +
+            `Un document similaire existe déjà :\n` +
+            `📝 ${dup.title}\n` +
+            `📂 ${categoryLabels[dup.category] || dup.category}\n` +
+            `📅 ${dup.extracted_date}\n` +
+            `💰 ${classification.amount} EUR\n\n` +
+            `Le document n'a pas été ajouté. Si c'est un document différent, renvoie-le et tape /forcer.`
+          );
+          return;
+        }
+      }
 
       // Sauvegarder dans Supabase Storage
       const year = classification.date ? new Date(classification.date).getFullYear() : new Date().getFullYear();

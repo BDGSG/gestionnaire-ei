@@ -7,9 +7,9 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const CONFIDENCE_THRESHOLD = 0.7;
 
 // Models
-const OCR_MODEL = 'mistralai/pixtral-large-latest';    // Best OCR for documents/tickets
-const CLASSIFY_MODEL = 'anthropic/claude-haiku-4-5';    // Fast classification on extracted text
-const SMART_MODEL = 'anthropic/claude-sonnet-4-5';      // Smart for regulatory analysis
+const OCR_MODEL = 'mistralai/pixtral-large-2411';       // Best OCR for documents/tickets
+const CLASSIFY_MODEL = 'anthropic/claude-haiku-4.5';    // Fast classification on extracted text
+const SMART_MODEL = 'anthropic/claude-sonnet-4.5';      // Smart for regulatory analysis
 
 function getApiKey() {
   return process.env.OPENROUTER_API_KEY || process.env.ANTHROPIC_API_KEY;
