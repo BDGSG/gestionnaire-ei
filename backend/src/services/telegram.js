@@ -477,11 +477,13 @@ function initBot() {
   // Réception de documents (photos/PDF)
   // ============================================
   bot.on('photo', async (msg) => {
+    console.log('[Telegram] Received photo from:', msg.from.id);
     if (!isOwner(msg)) return;
     await handleDocument(msg, 'photo');
   });
 
   bot.on('document', async (msg) => {
+    console.log('[Telegram] Received document from:', msg.from.id, 'file:', msg.document?.file_name);
     if (!isOwner(msg)) return;
     if (msg.document) {
       await handleDocument(msg, 'document');
@@ -505,7 +507,8 @@ function initBot() {
 
   async function handleDocument(msg, type) {
     const chatId = msg.chat.id;
-    bot.sendMessage(chatId, '🔍 Analyse du document en cours...');
+    console.log(`[Telegram] handleDocument: type=${type}, chat=${chatId}`);
+    await bot.sendMessage(chatId, '🔍 Analyse du document en cours...');
 
     try {
       let fileId, fileName, mimeType;
@@ -522,10 +525,12 @@ function initBot() {
       }
 
       // Télécharger le fichier
+      console.log(`[Telegram] Downloading file: ${fileName} (${mimeType})`);
       const fileLink = await bot.getFileLink(fileId);
       const response = await fetch(fileLink);
       const buffer = Buffer.from(await response.arrayBuffer());
       const base64 = buffer.toString('base64');
+      console.log(`[Telegram] Downloaded ${buffer.length} bytes, classifying...`);
 
       // Classifier via IA (supporte images ET PDF natifs)
       let classification;
@@ -538,6 +543,7 @@ function initBot() {
           fileName
         );
       }
+      console.log(`[Telegram] Classification result:`, JSON.stringify({ category: classification.category, confidence: classification.confidence, error: classification.error }));
 
       // Sauvegarder dans Supabase Storage
       const year = classification.date ? new Date(classification.date).getFullYear() : new Date().getFullYear();
