@@ -469,9 +469,11 @@ async function initBot() {
       console.log(`[Telegram] Chat message: "${msg.text.substring(0, 50)}..."`);
 
       // Sauvegarder le message utilisateur dans l'historique
-      await supabase.from('ei_chat_history').insert({
-        role: 'user', content: msg.text, chat_id: chatId, context_type: 'chat'
-      }).catch(() => {});
+      try {
+        await supabase.from('ei_chat_history').insert({
+          role: 'user', content: msg.text, chat_id: chatId, context_type: 'chat'
+        });
+      } catch (_) {}
 
       // Charger l'historique récent (20 derniers messages)
       const { data: historyRows } = await supabase.from('ei_chat_history')
@@ -530,9 +532,11 @@ async function initBot() {
 
       if (response) {
         // Sauvegarder la réponse dans l'historique
-        await supabase.from('ei_chat_history').insert({
-          role: 'assistant', content: response, chat_id: chatId, context_type: 'chat'
-        }).catch(() => {});
+        try {
+          await supabase.from('ei_chat_history').insert({
+            role: 'assistant', content: response, chat_id: chatId, context_type: 'chat'
+          });
+        } catch (_) {}
 
         await safeSend(chatId, response);
       } else {
@@ -955,10 +959,12 @@ async function initBot() {
       // Sauvegarder le résultat de classification dans l'historique chat
       // pour que l'IA ait le contexte si l'utilisateur répond par texte
       const docSummary = `[Document classifie] ${classification.title || fileName} — ${classification.category}, ${classification.date || '?'}, ${classification.amount_ttc ? classification.amount_ttc + ' EUR' : '?'}, emetteur: ${classification.vendor || '?'}, paiement: ${classification.payment_method || '?'}${classification.is_cash_advance ? ', avance de frais' : ''}${classification.questions && classification.questions.length > 0 ? '. Questions posees: ' + classification.questions.join('; ') : ''}`;
-      await supabase.from('ei_chat_history').insert({
-        role: 'assistant', content: docSummary, chat_id: chatId,
-        context_type: 'doc_question', linked_document_id: doc.id
-      }).catch(() => {});
+      try {
+        await supabase.from('ei_chat_history').insert({
+          role: 'assistant', content: docSummary, chat_id: chatId,
+          context_type: 'doc_question', linked_document_id: doc.id
+        });
+      } catch (_) {}
 
     } catch (err) {
       console.error('[Telegram] Document error:', err);
