@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { supabase } = require('./supabase');
-const { classifyDocument, CONFIDENCE_THRESHOLD } = require('./ai');
+const { classifyDocument, chatWithAI, CONFIDENCE_THRESHOLD } = require('./ai');
 const { generateInvoicePdf } = require('./pdf');
 const dayjs = require('dayjs');
 
@@ -345,14 +345,17 @@ function initBot() {
   // Note: callback_query handler is unified below after document handling
 
   // ============================================
-  // Réception des lignes de facture
+  // ============================================
+  // Réception messages texte: lignes facture OU chat IA
   // ============================================
   bot.on('message', async (msg) => {
     if (!isOwner(msg)) return;
+    if (!msg.text) return; // ignore non-text (photos/docs handled elsewhere)
+    if (msg.text.startsWith('/')) return; // commandes gérées par onText
     const chatId = msg.chat.id;
 
-    // Vérifier si on est en mode saisie de lignes
-    if (invoiceState[chatId] && invoiceState[chatId].step === 'items' && msg.text && !msg.text.startsWith('/')) {
+    // Mode saisie de lignes de facture
+    if (invoiceState[chatId] && invoiceState[chatId].step === 'items') {
       const parts = msg.text.split('|').map(s => s.trim());
       if (parts.length >= 3) {
         invoiceState[chatId].items.push({
@@ -368,7 +371,53 @@ function initBot() {
           `Total lignes: ${invoiceState[chatId].items.length}\n\n` +
           `Ajoutez une autre ligne ou tapez /valider`
         );
+        return;
       }
+    }
+
+    // Chat conversationnel IA
+    try {
+      console.log(`[Telegram] Chat message: "${msg.text.substring(0, 50)}..."`);
+
+      // Récupérer du contexte pour enrichir la réponse
+      const context = {};
+      try {
+        const { data: recentDocs } = await supabase.from('ei_documents')
+          .select('title, category, extracted_date, extracted_amount')
+          .order('created_at', { ascending: false }).limit(5);
+        if (recentDocs && recentDocs.length > 0) {
+          context.documents = recentDocs.map(d => `${d.title} (${d.category}, ${d.extracted_date || '?'}, ${d.extracted_amount ? d.extracted_amount + '€' : '?'})`).join('; ');
+        }
+
+        const { data: deadlines } = await supabase.from('ei_fiscal_deadlines')
+          .select('title, deadline_date, status')
+          .gte('deadline_date', dayjs().format('YYYY-MM-DD'))
+          .order('deadline_date', { ascending: true }).limit(3);
+        if (deadlines && deadlines.length > 0) {
+          context.deadlines = deadlines.map(d => `${d.title} (${d.deadline_date}, ${d.status})`).join('; ');
+        }
+
+        const { data: invoiceStats } = await supabase.from('ei_invoices')
+          .select('status, total_ttc');
+        if (invoiceStats && invoiceStats.length > 0) {
+          const total = invoiceStats.reduce((s, i) => s + parseFloat(i.total_ttc || 0), 0);
+          const paid = invoiceStats.filter(i => i.status === 'paid').reduce((s, i) => s + parseFloat(i.total_ttc || 0), 0);
+          context.stats = `${invoiceStats.length} factures, CA total: ${total.toFixed(2)}€, payé: ${paid.toFixed(2)}€`;
+        }
+      } catch (ctxErr) {
+        console.error('[Telegram] Context fetch error:', ctxErr.message);
+      }
+
+      const response = await chatWithAI(msg.text, context);
+
+      if (response) {
+        await safeSend(chatId, response);
+      } else {
+        await safeSend(chatId, "Désolé, je n'ai pas pu traiter ta demande. Réessaie ou utilise /aide pour voir les commandes.");
+      }
+    } catch (err) {
+      console.error('[Telegram] Chat error:', err.message);
+      bot.sendMessage(chatId, `Je n'ai pas pu répondre. Erreur: ${err.message.substring(0, 100)}`).catch(() => {});
     }
   });
 
@@ -511,32 +560,57 @@ function initBot() {
     await bot.sendMessage(chatId, '🔍 Analyse du document en cours...');
 
     try {
-      let fileId, fileName, mimeType;
+      let fileId, fileUniqueId, fileName, mimeType;
 
       if (type === 'photo') {
         const photo = msg.photo[msg.photo.length - 1];
         fileId = photo.file_id;
+        fileUniqueId = photo.file_unique_id; // Stable across re-sends
         fileName = `photo_${Date.now()}.jpg`;
         mimeType = 'image/jpeg';
       } else {
         fileId = msg.document.file_id;
+        fileUniqueId = msg.document.file_unique_id;
         fileName = msg.document.file_name || `doc_${Date.now()}`;
         mimeType = msg.document.mime_type || 'application/octet-stream';
       }
 
+      // --- Anti-doublon Layer 0: Telegram file_unique_id (le plus fiable) ---
+      // file_unique_id est stable même si la photo est recompressée par Telegram
+      if (fileUniqueId) {
+        const { data: uidDups } = await supabase
+          .from('ei_documents')
+          .select('id, title, category, extracted_date, created_at')
+          .eq('telegram_file_unique_id', fileUniqueId)
+          .limit(1);
+
+        if (uidDups && uidDups.length > 0) {
+          const dup = uidDups[0];
+          const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
+          await safeSend(chatId,
+            `⚠️ *Doublon détecté !*\n\n` +
+            `Ce document existe déjà :\n` +
+            `📝 ${dup.title}\n` +
+            `📂 ${categoryLabels[dup.category] || dup.category}\n` +
+            `📅 ${dupDate}\n\n` +
+            `Le document n'a pas été ajouté une 2ème fois.`
+          );
+          return;
+        }
+      }
+
       // Télécharger le fichier
-      console.log(`[Telegram] Downloading file: ${fileName} (${mimeType})`);
+      console.log(`[Telegram] Downloading file: ${fileName} (${mimeType}), uniqueId: ${fileUniqueId}`);
       const fileLink = await bot.getFileLink(fileId);
       const response = await fetch(fileLink);
       const buffer = Buffer.from(await response.arrayBuffer());
       const base64 = buffer.toString('base64');
       console.log(`[Telegram] Downloaded ${buffer.length} bytes`);
 
-      // --- Anti-doublon : hash du fichier ---
+      // --- Anti-doublon Layer 1: hash SHA-256 exact ---
       const crypto = require('crypto');
       const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
 
-      // Check 1: exact hash match (même fichier binaire)
       const { data: hashDups } = await supabase
         .from('ei_documents')
         .select('id, title, category, extracted_date, created_at')
@@ -548,7 +622,7 @@ function initBot() {
         const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
         await safeSend(chatId,
           `⚠️ *Doublon détecté !*\n\n` +
-          `Ce document existe déjà :\n` +
+          `Ce document existe déjà (hash identique) :\n` +
           `📝 ${dup.title}\n` +
           `📂 ${categoryLabels[dup.category] || dup.category}\n` +
           `📅 ${dupDate}\n\n` +
@@ -557,31 +631,7 @@ function initBot() {
         return;
       }
 
-      // Check 2: même fichier reçu récemment (Telegram compresse, hash différent)
-      // Si même nom de fichier + taille similaire (+/- 20%) dans les 5 dernières minutes → probablement un doublon
-      const fiveMinAgo = dayjs().subtract(5, 'minute').toISOString();
-      const { data: recentDups } = await supabase
-        .from('ei_documents')
-        .select('id, title, category, extracted_date, file_size, created_at')
-        .eq('original_filename', fileName)
-        .gte('created_at', fiveMinAgo)
-        .limit(1);
-
-      if (recentDups && recentDups.length > 0) {
-        const dup = recentDups[0];
-        const dupDate = dup.extracted_date || dayjs(dup.created_at).format('YYYY-MM-DD');
-        await safeSend(chatId,
-          `⚠️ *Doublon détecté !*\n\n` +
-          `Ce document a été envoyé il y a moins de 5 minutes :\n` +
-          `📝 ${dup.title}\n` +
-          `📂 ${categoryLabels[dup.category] || dup.category}\n` +
-          `📅 ${dupDate}\n\n` +
-          `Le document n'a pas été ajouté une 2ème fois.`
-        );
-        return;
-      }
-
-      console.log(`[Telegram] No duplicate found (hash: ${fileHash.substring(0, 12)}...), classifying...`);
+      console.log(`[Telegram] No duplicate found (hash: ${fileHash.substring(0, 12)}..., uid: ${fileUniqueId}), classifying...`);
 
       // Classifier via IA (supporte images ET PDF natifs)
       let classification;
@@ -628,21 +678,26 @@ function initBot() {
       const year = classification.date ? new Date(classification.date).getFullYear() : new Date().getFullYear();
       const storagePath = `${classification.category}/${year}/${Date.now()}_${fileName}`;
 
+      console.log(`[Telegram] Uploading to storage: ${storagePath} (${buffer.length} bytes)`);
       const { error: uploadErr } = await supabase.storage
         .from('ei-documents')
         .upload(storagePath, buffer, { contentType: mimeType });
 
-      if (uploadErr) throw uploadErr;
+      if (uploadErr) {
+        console.error('[Telegram] Storage upload error:', JSON.stringify(uploadErr));
+        throw new Error(`Storage upload: ${uploadErr.message || JSON.stringify(uploadErr)}`);
+      }
+      console.log('[Telegram] Storage upload OK');
 
       // Sauvegarder les métadonnées
-      const { data: doc, error: dbErr } = await supabase.from('ei_documents').insert({
+      const insertData = {
         category: classification.category || 'autre',
         title: classification.title || fileName,
-        description: classification.description,
-        extracted_date: classification.date,
-        extracted_amount: classification.amount,
-        extracted_vendor: classification.vendor,
-        extracted_reference: classification.reference,
+        description: classification.description || null,
+        extracted_date: classification.date || null,
+        extracted_amount: classification.amount || null,
+        extracted_vendor: classification.vendor || null,
+        extracted_reference: classification.reference || null,
         original_filename: fileName,
         file_type: mimeType.split('/')[1] || 'unknown',
         file_size: buffer.length,
@@ -651,12 +706,20 @@ function initBot() {
         month: classification.date ? new Date(classification.date).getMonth() + 1 : new Date().getMonth() + 1,
         source: 'telegram',
         telegram_file_id: fileId,
+        telegram_file_unique_id: fileUniqueId || null,
         ai_classification_confidence: classification.confidence || 0,
         ocr_text: classification.ocr_text || null,
         file_hash: fileHash
-      }).select().single();
+      };
+      console.log('[Telegram] Inserting document:', JSON.stringify({ category: insertData.category, title: insertData.title, date: insertData.extracted_date }));
 
-      if (dbErr) throw dbErr;
+      const { data: doc, error: dbErr } = await supabase.from('ei_documents').insert(insertData).select().single();
+
+      if (dbErr) {
+        console.error('[Telegram] DB insert error:', JSON.stringify(dbErr));
+        throw new Error(`DB insert: ${dbErr.message || JSON.stringify(dbErr)}`);
+      }
+      console.log(`[Telegram] Document saved: ${doc.id}`);
 
       // Escape markdown special chars in AI-generated strings
       const esc = (s) => s ? String(s).replace(/([*_`\[\]])/g, '\\$1') : '';

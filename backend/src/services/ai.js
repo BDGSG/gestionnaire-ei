@@ -202,4 +202,55 @@ async function classifyWithVision(base64Content, mimeType, filename) {
   return { category: 'autre', title: filename, confidence: 0, needs_review: true, doubt_reason: 'OCR et vision ont echoue' };
 }
 
-module.exports = { classifyDocument, ocrDocument, classifyFromText, callOpenRouter, CONFIDENCE_THRESHOLD, OCR_MODEL, CLASSIFY_MODEL, SMART_MODEL };
+const CHAT_MODEL = 'anthropic/claude-haiku-4.5';
+
+/**
+ * Chat conversationnel - l'assistant de gestion EI
+ * Peut répondre aux questions, donner des instructions, résumer la situation
+ */
+async function chatWithAI(userMessage, context = {}) {
+  const systemPrompt = `Tu es l'assistant de gestion de l'Entreprise Individuelle DIAMBRA BROU (SIRET: 82364255800048).
+Activités: VTC (Uber/Bolt) et e-commerce.
+Régime: EI au réel, assujetti TVA.
+
+Tu aides le gérant via Telegram pour:
+- Répondre à ses questions sur la gestion, fiscalité, TVA, obligations
+- L'aider à créer des factures, devis, gérer ses clients
+- Expliquer les documents classifiés
+- Donner des rappels sur les échéances fiscales
+- Résumer la situation financière
+
+Contexte actuel:
+${context.documents ? `- Documents récents: ${context.documents}` : ''}
+${context.deadlines ? `- Prochaines échéances: ${context.deadlines}` : ''}
+${context.stats ? `- Stats: ${context.stats}` : ''}
+
+Réponds en français, de manière concise et pratique. Si tu ne sais pas, dis-le.
+Utilise un ton professionnel mais amical. Pas d'emojis excessifs.
+Si le message concerne une action (créer facture, ajouter client...), explique la commande à utiliser.
+
+Commandes disponibles:
+/facture - Créer une nouvelle facture
+/devis - Créer un nouveau devis
+/clients - Liste des clients
+/newclient - Ajouter un client
+/docs - Derniers documents
+/chercher [terme] - Rechercher un document
+/tva - Résumé TVA
+/echeances - Échéances fiscales
+/stats - Statistiques
+/aide - Aide complète`;
+
+  try {
+    const response = await callOpenRouter(CHAT_MODEL, [
+      { role: 'user', content: userMessage }
+    ], { maxTokens: 1000, system: systemPrompt });
+
+    return response;
+  } catch (err) {
+    console.error('[AI] Chat error:', err.message);
+    return null;
+  }
+}
+
+module.exports = { classifyDocument, ocrDocument, classifyFromText, callOpenRouter, chatWithAI, CONFIDENCE_THRESHOLD, OCR_MODEL, CLASSIFY_MODEL, SMART_MODEL };
