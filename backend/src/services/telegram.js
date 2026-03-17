@@ -708,9 +708,13 @@ async function initBot() {
         title: classification.title || fileName,
         description: classification.description || null,
         extracted_date: classification.date || null,
-        extracted_amount: classification.amount || null,
+        extracted_amount: classification.amount_ttc || classification.amount || null,
+        extracted_amount_ht: classification.amount_ht || null,
+        extracted_amount_tva: classification.amount_tva || null,
         extracted_vendor: classification.vendor || null,
+        extracted_vendor_siret: classification.vendor_siret || null,
         extracted_reference: classification.reference || null,
+        field_confidence: classification.field_confidence || null,
         original_filename: fileName,
         file_type: mimeType.split('/')[1] || 'unknown',
         file_size: buffer.length,
@@ -745,54 +749,72 @@ async function initBot() {
         fournitures: '🖊️ Fournitures', deplacement: '🚗 Déplacement', peage: '🛣️ Péage', parking: '🅿️ Parking'
       };
 
-      // Si confiance haute → confirmation simple
-      if (!classification.needs_review) {
-        await safeSend(chatId,
-          `✅ *Document classifié et archivé*\n\n` +
-          `📂 ${categoryLabels[classification.category] || classification.category}\n` +
-          `📝 ${esc(classification.title)}\n` +
-          `${classification.expense_type ? '🏷️ Type: ' + (expenseLabels[classification.expense_type] || classification.expense_type) + '\n' : ''}` +
-          `${classification.date ? '📅 Date: ' + classification.date + '\n' : ''}` +
-          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €\n' : ''}` +
-          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) + '\n' : ''}` +
-          `${classification.reference ? '🔢 Réf: ' + esc(classification.reference) + '\n' : ''}` +
-          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%`
-        );
-      } else {
-        // Confiance basse → demande de confirmation avec boutons
+      // Field-level confidence display
+      const fc = classification.field_confidence || {};
+      const fieldLine = (emoji, label, value, fieldName) => {
+        if (!value) return '';
+        const conf = fc[fieldName];
+        const warn = (conf != null && conf < 0.9) ? ' ⚠️' : '';
+        const fmt = (conf != null && conf < 0.9) ? `_${esc(String(value))}_` : esc(String(value));
+        return `${emoji} ${label}: ${fmt}${warn}\n`;
+      };
+
+      // Amount display with cross-check
+      let amountDisplay = '';
+      if (classification.amount_ht != null || classification.amount_ttc != null) {
+        if (classification.amount_ht != null) amountDisplay += fieldLine('💶', 'HT', classification.amount_ht + ' EUR', 'amount_ht');
+        if (classification.amount_tva != null) amountDisplay += fieldLine('📊', 'TVA', classification.amount_tva + ' EUR', 'amount_tva');
+        if (classification.amount_ttc != null) amountDisplay += fieldLine('💰', 'TTC', classification.amount_ttc + ' EUR', 'amount_ttc');
+        if (classification.amount_mismatch) {
+          amountDisplay += '⚠️ _Incohérence HT + TVA ≠ TTC_\n';
+        }
+      } else if (classification.amount) {
+        amountDisplay = fieldLine('💰', 'Montant', classification.amount + ' EUR', 'amount_ttc');
+      }
+
+      // Build keyboard for review/correction
+      const keyboard = [];
+
+      if (classification.needs_review || classification.amount_mismatch) {
+        // Category correction buttons
         const suggestions = classification.suggested_categories || [];
         const allCats = [...new Set([classification.category, ...suggestions])].filter(Boolean);
-
-        const keyboard = allCats.map(cat => [{
-          text: `${categoryLabels[cat] || cat}`,
-          callback_data: `doc_reclass_${doc.id}_${cat}`
-        }]);
-
-        // Ajouter les catégories les plus courantes si pas déjà dedans
         const commonCats = ['facture_recue', 'facture_emise', 'fiscal', 'administratif', 'autre'];
         const extraCats = commonCats.filter(c => !allCats.includes(c));
-        for (let i = 0; i < extraCats.length && keyboard.length < 6; i++) {
-          keyboard.push([{
-            text: categoryLabels[extraCats[i]] || extraCats[i],
-            callback_data: `doc_reclass_${doc.id}_${extraCats[i]}`
-          }]);
+        const catList = [...allCats, ...extraCats].slice(0, 5);
+
+        for (const cat of catList) {
+          if (cat !== classification.category) {
+            keyboard.push([{
+              text: categoryLabels[cat] || cat,
+              callback_data: `doc_reclass_${doc.id}_${cat}`
+            }]);
+          }
         }
-
-        keyboard.push([{ text: '✅ Garder: ' + (categoryLabels[classification.category] || classification.category), callback_data: `doc_confirm_${doc.id}` }]);
-
-        await safeSend(chatId,
-          `⚠️ *Document classifié avec doute*\n\n` +
-          `📂 Suggestion: ${categoryLabels[classification.category] || classification.category}\n` +
-          `📝 ${esc(classification.title)}\n` +
-          `${classification.date ? '📅 Date: ' + classification.date : ''}\n` +
-          `${classification.amount ? '💰 Montant: ' + classification.amount + ' €' : ''}\n` +
-          `${classification.vendor ? '🏢 Émetteur: ' + esc(classification.vendor) : ''}\n` +
-          `📊 Confiance: ${Math.round((classification.confidence || 0) * 100)}%\n` +
-          `${classification.doubt_reason ? '\n❓ ' + esc(classification.doubt_reason) : ''}\n\n` +
-          `👇 *Choisis la bonne catégorie:*`,
-          { reply_markup: { inline_keyboard: keyboard } }
-        );
       }
+
+      keyboard.push([{ text: '✅ Correct', callback_data: `doc_confirm_${doc.id}` }]);
+
+      const confPercent = Math.round((classification.confidence || 0) * 100);
+      const header = classification.needs_review
+        ? `⚠️ *Document classifié — vérification requise*`
+        : `✅ *Document classifié et archivé*`;
+
+      const msgText =
+        `${header}\n\n` +
+        `📂 ${categoryLabels[classification.category] || classification.category}\n` +
+        `📝 ${esc(classification.title)}\n` +
+        `${classification.expense_type ? '🏷️ ' + (expenseLabels[classification.expense_type] || classification.expense_type) + '\n' : ''}` +
+        fieldLine('📅', 'Date', classification.date, 'date') +
+        amountDisplay +
+        fieldLine('🏢', 'Emetteur', classification.vendor, 'vendor') +
+        fieldLine('🔢', 'Ref', classification.reference, 'reference') +
+        `${classification.vendor_siret ? '🏛️ SIRET: ' + esc(classification.vendor_siret) + '\n' : ''}` +
+        `📊 Confiance: ${confPercent}%` +
+        `${classification.doubt_reason ? '\n❓ ' + esc(classification.doubt_reason) : ''}` +
+        `${classification.amount_mismatch ? '\n\n⚠️ *Vérifie les montants avant de confirmer*' : ''}`;
+
+      await safeSend(chatId, msgText, { reply_markup: { inline_keyboard: keyboard } });
 
     } catch (err) {
       console.error('[Telegram] Document error:', err);
