@@ -41,6 +41,35 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// FEC export endpoint
+app.get('/api/fec/:year', async (req, res) => {
+  try {
+    const { exportFEC } = require('./services/accounting');
+    const year = parseInt(req.params.year);
+    if (!year || year < 2020 || year > 2030) return res.status(400).json({ error: 'Invalid year' });
+    const result = await exportFEC(year);
+    if (!result) return res.status(404).json({ error: 'No entries for this year' });
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.send(result.content);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Journal summary endpoint
+app.get('/api/journal/:year/:month?', async (req, res) => {
+  try {
+    const { getJournalSummary } = require('./services/accounting');
+    const year = parseInt(req.params.year);
+    const month = req.params.month ? parseInt(req.params.month) : null;
+    const summary = await getJournalSummary(year, month);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Serve frontend in production
 if (process.env.NODE_ENV === 'production') {
   const frontendPath = path.resolve(__dirname, '..', 'frontend', 'dist');

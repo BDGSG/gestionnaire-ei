@@ -3,6 +3,7 @@ const { supabase } = require('./supabase');
 const { classifyDocument, chatWithAI, CONFIDENCE_THRESHOLD } = require('./ai');
 const { checkDuplicate } = require('./dedup');
 const { generateInvoicePdf } = require('./pdf');
+const { writeExpenseEntries, getJournalSummary } = require('./accounting');
 const dayjs = require('dayjs');
 
 // Lazy import to avoid circular dependency
@@ -78,9 +79,12 @@ async function initBot() {
       `📂 /docs - Rechercher un document\n` +
       `💳 /recette - Enregistrer une recette\n` +
       `💸 /depense - Enregistrer une dépense\n` +
-      `⚖️ /veille - Veille réglementaire (nouvelles lois)\n` +
+      `📒 /journal - Livre-journal comptable\n` +
+      `📤 /fec 2026 - Exporter le FEC (controle fiscal)\n` +
+      `⚖️ /veille - Veille reglementaire\n` +
       `🌐 /web - Lien vers le dashboard\n\n` +
-      `📎 *Envoyez une photo ou un PDF* pour le classer automatiquement`,
+      `📎 *Envoyez une photo ou un PDF* pour le classer automatiquement\n` +
+      `💬 *Ecrivez un message* pour discuter avec l'assistant IA`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -210,6 +214,77 @@ async function initBot() {
       `📅 *Prochaines échéances fiscales*\n\n${lines}`,
       { parse_mode: 'Markdown' }
     );
+  });
+
+  // ============================================
+  // /journal - Résumé livre-journal
+  // ============================================
+  bot.onText(/\/journal(?:\s+(\d{4}))?(?:\s+(\d{1,2}))?/, async (msg, match) => {
+    if (!isOwner(msg)) return;
+    const year = parseInt(match[1]) || new Date().getFullYear();
+    const month = match[2] ? parseInt(match[2]) : null;
+
+    const summary = await getJournalSummary(year, month);
+    if (summary.error) return bot.sendMessage(msg.chat.id, `Erreur: ${summary.error}`);
+
+    if (summary.count === 0) {
+      return bot.sendMessage(msg.chat.id, `📒 Aucune ecriture pour ${month ? month + '/' : ''}${year}`);
+    }
+
+    // Group by journal
+    const byJournal = {};
+    for (const e of summary.entries) {
+      const jc = e.journal_code || 'OD';
+      if (!byJournal[jc]) byJournal[jc] = { debit: 0, credit: 0, count: 0 };
+      byJournal[jc].debit += parseFloat(e.debit || 0);
+      byJournal[jc].credit += parseFloat(e.credit || 0);
+      byJournal[jc].count++;
+    }
+
+    const journalNames = { VE: 'Ventes', AC: 'Achats', BQ: 'Banque', CA: 'Caisse', OD: 'OD' };
+    const jLines = Object.entries(byJournal).map(([code, j]) =>
+      `  ${journalNames[code] || code}: ${j.count} ecritures | D: ${j.debit.toFixed(2)} | C: ${j.credit.toFixed(2)}`
+    ).join('\n');
+
+    const balanceIcon = summary.balanced ? '✅' : '⚠️';
+
+    await safeSend(msg.chat.id,
+      `📒 *Livre-journal ${month ? month + '/' : ''}${year}*\n\n` +
+      `Ecritures: ${summary.count}\n` +
+      `Total debit: ${summary.totalDebit.toFixed(2)} EUR\n` +
+      `Total credit: ${summary.totalCredit.toFixed(2)} EUR\n` +
+      `${balanceIcon} Equilibre: ${summary.balanced ? 'OK' : 'DESEQUILIBRE'}\n\n` +
+      `Par journal:\n${jLines}\n\n` +
+      `_/fec ${year} pour exporter le FEC_`
+    );
+  });
+
+  // ============================================
+  // /fec - Exporter le FEC
+  // ============================================
+  bot.onText(/\/fec(?:\s+(\d{4}))?/, async (msg, match) => {
+    if (!isOwner(msg)) return;
+    const year = parseInt(match[1]) || new Date().getFullYear();
+
+    bot.sendMessage(msg.chat.id, `⏳ Export FEC ${year} en cours...`);
+
+    try {
+      const { exportFEC } = require('./accounting');
+      const result = await exportFEC(year);
+
+      if (!result) {
+        return bot.sendMessage(msg.chat.id, `Aucune ecriture pour ${year}.`);
+      }
+
+      // Send as file
+      const buf = Buffer.from(result.content, 'utf-8');
+      await bot.sendDocument(msg.chat.id, buf, {
+        caption: `FEC ${year} — ${result.count} ecritures`
+      }, { filename: result.filename, contentType: 'text/plain' });
+    } catch (err) {
+      console.error('[Telegram] FEC export error:', err.message);
+      bot.sendMessage(msg.chat.id, `Erreur export FEC: ${err.message}`);
+    }
   });
 
   // ============================================
@@ -760,10 +835,16 @@ async function initBot() {
             document_id: doc.id,
             notes: classification.is_cash_advance ? 'Avance de frais - remboursement en attente' : null
           };
-          const { data: tx, error: txErr } = await supabase.from('ei_transactions').insert(txData).select('id').single();
+          const { data: tx, error: txErr } = await supabase.from('ei_transactions').insert(txData).select().single();
           if (!txErr && tx) {
             await supabase.from('ei_documents').update({ linked_transaction_id: tx.id }).eq('id', doc.id);
             console.log(`[Telegram] Auto-created transaction ${tx.id} for doc ${doc.id}`);
+            // Auto-écriture comptable dans le livre-journal
+            try {
+              await writeExpenseEntries(tx, doc);
+            } catch (accErr) {
+              console.error('[Telegram] Accounting entry error:', accErr.message);
+            }
           }
         } catch (txErr) {
           console.error('[Telegram] Auto-transaction error:', txErr.message);
